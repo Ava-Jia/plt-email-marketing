@@ -1,0 +1,207 @@
+"""邮件发送记录：支持分页与按收件人/主题模糊筛选，以及按状态/To/From/Cc/发送日期筛选。"""
+from datetime import datetime, timezone, timedelta
+import json
+
+from fastapi import APIRouter, Depends, HTTPException, status
+from sqlalchemy import or_
+from sqlalchemy.orm import Session
+
+from app.database import get_db
+from app.dependencies import CurrentUser
+from app.models import EmailRecord, EmailImage, User
+
+router = APIRouter(prefix="/records", tags=["records"])
+BEIJING = timezone(timedelta(hours=8))
+
+
+def _to_beijing_iso(dt: datetime | None) -> str | None:
+    """转为北京时间 ISO 字符串，避免前端再转时区导致晚 8 小时。"""
+    if dt is None:
+        return None
+    if dt.tzinfo is None:
+        dt = dt.replace(tzinfo=timezone.utc)
+    return dt.astimezone(BEIJING).isoformat()
+
+
+def _base_query(db: Session, current_user):
+    """当前用户可见的记录基查询（销售仅本人，管理员全部）。"""
+    q = (
+        db.query(EmailRecord, User.name)
+        .join(User, EmailRecord.sales_id == User.id, isouter=True)
+    )
+    if current_user.role != "admin":
+        q = q.filter(EmailRecord.sales_id == current_user.id)
+    return q
+
+
+@router.get("/filters")
+def get_record_filters(
+    current_user: CurrentUser,
+    db: Session = Depends(get_db),
+):
+    """返回各列的可选筛选值（去重），供前端下拉框使用。"""
+    base = _base_query(db, current_user)
+
+    statuses = ["queued", "sent"]
+    to_emails = sorted(
+        x[0] for x in base.with_entities(EmailRecord.to_email).distinct().all() if x[0]
+    )
+    from_emails = sorted(
+        x[0] for x in base.with_entities(EmailRecord.from_email).distinct().all() if x[0]
+    )
+    cc_emails = sorted(
+        x[0] for x in base.with_entities(EmailRecord.cc_email).distinct().all() if x[0]
+    )
+
+    sent_at_list = (
+        base.with_entities(EmailRecord.sent_at)
+        .filter(EmailRecord.status == "sent", EmailRecord.sent_at.isnot(None))
+        .all()
+    )
+    sent_dates = []
+    for x in sent_at_list:
+        if not x[0]:
+            continue
+        dt = x[0] if x[0].tzinfo else x[0].replace(tzinfo=timezone.utc)
+        sent_dates.append(dt.astimezone(BEIJING).date().isoformat())
+    sent_dates = sorted(set(sent_dates))
+
+    return {
+        "statuses": statuses,
+        "to_emails": to_emails,
+        "from_emails": from_emails,
+        "cc_emails": cc_emails,
+        "sent_dates": sent_dates,
+    }
+
+
+@router.get("")
+def list_records(
+    current_user: CurrentUser,
+    db: Session = Depends(get_db),
+    page: int = 1,
+    page_size: int = 10,
+    q: str | None = None,
+    status: str | None = None,
+    to_email: str | None = None,
+    from_email: str | None = None,
+    cc_email: str | None = None,
+    sent_date: str | None = None,
+):
+    """当前用户（销售：仅本人；管理员：全部）的邮件记录列表，支持多列筛选。"""
+    if page < 1:
+        page = 1
+    if page_size < 1 or page_size > 100:
+        page_size = 10
+
+    query = _base_query(db, current_user)
+
+    if q:
+        pattern = f"%{q}%"
+        query = query.filter(
+            or_(
+                EmailRecord.to_email.ilike(pattern),
+                EmailRecord.subject.ilike(pattern),
+                EmailRecord.content.ilike(pattern),
+            )
+        )
+
+    if status:
+        query = query.filter(EmailRecord.status == status)
+    if to_email:
+        query = query.filter(EmailRecord.to_email == to_email)
+    if from_email:
+        query = query.filter(EmailRecord.from_email == from_email)
+    if cc_email:
+        query = query.filter(EmailRecord.cc_email == cc_email)
+    if sent_date:
+        try:
+            y, m, d = map(int, sent_date.split("-"))
+            start_beijing = datetime(y, m, d, 0, 0, 0, tzinfo=BEIJING)
+            end_beijing = start_beijing + timedelta(days=1)
+            start_utc = start_beijing.astimezone(timezone.utc)
+            end_utc = end_beijing.astimezone(timezone.utc)
+            query = query.filter(
+                EmailRecord.status == "sent",
+                EmailRecord.sent_at >= start_utc,
+                EmailRecord.sent_at < end_utc,
+            )
+        except (ValueError, TypeError):
+            pass
+
+    total = query.count()
+    rows = (
+        query.order_by(EmailRecord.created_at.desc())
+        .offset((page - 1) * page_size)
+        .limit(page_size)
+        .all()
+    )
+
+    # 预取本页所有记录涉及的图片名称，避免 N+1 查询
+    image_ids_map: dict[int, list[int]] = {}
+    image_id_set: set[int] = set()
+    for rec, _sales_name in rows:
+        if rec.image_ids:
+            try:
+                ids = [int(x) for x in json.loads(rec.image_ids)]
+            except Exception:
+                ids = []
+        else:
+            ids = []
+        image_ids_map[rec.id] = ids
+        image_id_set.update(ids)
+
+    image_name_by_id: dict[int, str] = {}
+    if image_id_set:
+        img_rows = db.query(EmailImage).filter(EmailImage.id.in_(image_id_set)).all()
+        for img in img_rows:
+            image_name_by_id[img.id] = img.name
+
+    items = []
+    for rec, sales_name in rows:
+        sent_at_iso = _to_beijing_iso(rec.sent_at) if (rec.status == "sent" and rec.sent_at) else None
+        ids = image_ids_map.get(rec.id, [])
+        image_names = [image_name_by_id.get(i, str(i)) for i in ids if i in image_name_by_id]
+        items.append(
+            {
+                "id": rec.id,
+                "sales_id": rec.sales_id,
+                "sales_name": sales_name or "",
+                "to_email": rec.to_email,
+                "from_email": rec.from_email,
+                "cc_email": rec.cc_email,
+                "subject": rec.subject or "",
+                "content": rec.content,
+                "image_names": image_names,
+                "status": rec.status or "sent",
+                "created_at": rec.created_at.isoformat() if isinstance(rec.created_at, datetime) else None,
+                "sent_at": sent_at_iso,
+            }
+        )
+
+    return {
+        "items": items,
+        "total": total,
+        "page": page,
+        "page_size": page_size,
+    }
+
+
+@router.delete("/{record_id}")
+def cancel_queued_record(
+    record_id: int,
+    current_user: CurrentUser,
+    db: Session = Depends(get_db),
+):
+    """取消排队中的邮件：仅允许取消 status=queued 且当前用户有权限的记录，取消后从队列移除且列表不再展示。"""
+    rec = db.query(EmailRecord).filter(EmailRecord.id == record_id).first()
+    if not rec:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="记录不存在")
+    if current_user.role != "admin" and rec.sales_id != current_user.id:
+        raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="无权操作该记录")
+    if rec.status != "queued":
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="只能取消「排队中」的邮件")
+    db.delete(rec)
+    db.commit()
+    return {"ok": True, "detail": "已取消发送，该邮件已从队列中移除"}
+
