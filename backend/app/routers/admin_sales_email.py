@@ -4,7 +4,7 @@ from sqlalchemy.orm import Session
 
 from app.database import get_db
 from app.dependencies import AdminUser
-from app.models import SalesPltEmail, User
+from app.models import SalesPltEmail, SalesEmailAdminExcluded, User
 from app.schemas.sales_plt_email import SalesPltEmailCreate, SalesPltEmailUpdate, SalesPltEmailRead
 
 router = APIRouter(prefix="/admin/sales-email", tags=["admin-sales-email"])
@@ -42,7 +42,8 @@ def list_users_for_admin(
     admin: AdminUser,
     db: Session = Depends(get_db),
 ):
-    """列出所有用户（供管理员在下拉框中选择销售）。"""
+    """列出用户，供销售邮箱表使用。销售角色中，已被「清除」的不再返回。"""
+    excluded_ids = {r.sales_id for r in db.query(SalesEmailAdminExcluded.sales_id).all()}
     users = db.query(User).order_by(User.id).all()
     return [
         {
@@ -53,6 +54,7 @@ def list_users_for_admin(
             "cc_email": u.cc_email,
         }
         for u in users
+        if not (u.role == "sales" and u.id in excluded_ids)
     ]
 
 
@@ -82,5 +84,22 @@ def delete_sales_email(
     if not row:
         raise HTTPException(status_code=404, detail="记录不存在")
     db.delete(row)
+    db.commit()
+    return None
+
+
+@router.delete("/sales/{sales_id}", status_code=status.HTTP_204_NO_CONTENT)
+def clear_sales_from_table(
+    sales_id: int,
+    admin: AdminUser,
+    db: Session = Depends(get_db),
+):
+    """清除：删除 plt 邮箱配置（若有），并将该销售从列表中移除（不再显示）。"""
+    mapping = db.query(SalesPltEmail).filter(SalesPltEmail.sales_id == sales_id).first()
+    if mapping:
+        db.delete(mapping)
+    existing = db.query(SalesEmailAdminExcluded).filter(SalesEmailAdminExcluded.sales_id == sales_id).first()
+    if not existing:
+        db.add(SalesEmailAdminExcluded(sales_id=sales_id))
     db.commit()
     return None

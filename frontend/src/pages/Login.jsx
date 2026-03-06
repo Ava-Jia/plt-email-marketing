@@ -82,11 +82,13 @@ export default function Login() {
               value={password}
               onChange={(e) => setPassword(e.target.value)}
               required
+              minLength={8}
               autoComplete="new-password"
             />
+            <p className="text-muted text-sm mt-1">至少 8 位，需包含大小写字母和数字</p>
           </div>
           <div className="form-group">
-            <label className="form-label">邮箱（将作为您发件时的被 CC 邮箱）</label>
+            <label className="form-label">邮箱（请填写，将作为您发件时的被 CC 邮箱）</label>
             <input
               type="email"
               className="input"

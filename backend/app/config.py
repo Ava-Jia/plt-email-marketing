@@ -44,6 +44,9 @@ class Settings(BaseSettings):
     # 上传目录（相对项目根或绝对路径）
     upload_dir: str = "uploads"
 
+    # 应用日志目录（按日期分文件，如 logs/2025-03-06.log）
+    log_dir: str = "logs"
+
     # CORS
     cors_origins: str = "http://localhost:5173,http://127.0.0.1:5173"
 

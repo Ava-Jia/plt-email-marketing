@@ -2,6 +2,7 @@
 from app.database import Base
 from app.models.user import User, UserRole
 from app.models.sales_plt_email import SalesPltEmail
+from app.models.sales_email_admin_excluded import SalesEmailAdminExcluded
 from app.models.customer_list import CustomerList
 from app.models.email_image import EmailImage
 from app.models.email_template import EmailTemplate
@@ -13,6 +14,7 @@ __all__ = [
     "User",
     "UserRole",
     "SalesPltEmail",
+    "SalesEmailAdminExcluded",
     "CustomerList",
     "EmailImage",
     "EmailTemplate",

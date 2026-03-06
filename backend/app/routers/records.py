@@ -9,6 +9,7 @@ from sqlalchemy.orm import Session
 from app.database import get_db
 from app.dependencies import CurrentUser
 from app.models import EmailRecord, EmailImage, User
+from app.services.app_logger import log_queued_cancelled
 
 router = APIRouter(prefix="/records", tags=["records"])
 BEIJING = timezone(timedelta(hours=8))
@@ -201,6 +202,7 @@ def cancel_queued_record(
         raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="无权操作该记录")
     if rec.status != "queued":
         raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="只能取消「排队中」的邮件")
+    log_queued_cancelled(current_user.name, current_user.login, rec.to_email)
     db.delete(rec)
     db.commit()
     return {"ok": True, "detail": "已取消发送，该邮件已从队列中移除"}

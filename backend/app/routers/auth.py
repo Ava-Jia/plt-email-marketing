@@ -7,6 +7,7 @@ from app.models import User
 from app.models.user import UserRole
 from app.schemas.auth import LoginRequest, LoginResponse, RegisterRequest, UserInfo
 from app.services.auth_service import create_access_token, hash_password, verify_password
+from app.services.app_logger import log_register
 
 router = APIRouter(prefix="/auth", tags=["auth"])
 
@@ -43,6 +44,7 @@ def register(data: RegisterRequest, db: Session = Depends(get_db)):
     db.add(user)
     db.commit()
     db.refresh(user)
+    log_register(user.login, user.name, user.cc_email)
     token = create_access_token(sub=str(user.id), role=user.role)
     return LoginResponse(
         token=token,

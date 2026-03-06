@@ -23,9 +23,18 @@ class RegisterRequest(BaseModel):
 
     @field_validator("password")
     @classmethod
-    def password_not_empty(cls, v: str) -> str:
+    def password_strength(cls, v: str) -> str:
         if not (v and v.strip()):
             raise ValueError("密码不能为空")
+        p = v
+        if len(p) < 8:
+            raise ValueError("密码至少 8 位")
+        if not re.search(r"[a-z]", p):
+            raise ValueError("密码需包含小写字母")
+        if not re.search(r"[A-Z]", p):
+            raise ValueError("密码需包含大写字母")
+        if not re.search(r"\d", p):
+            raise ValueError("密码需包含数字")
         return v
 
     @field_validator("email")

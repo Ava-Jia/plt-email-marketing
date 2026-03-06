@@ -66,6 +66,7 @@ function AdminSalesEmails() {
       setMessage('请先填写 plt 邮箱')
       return
     }
+    if (!window.confirm(`确定保存？保存后将更新【${row.name}】发件时被 CC 的邮箱为：${email}`)) return
     setMessage('')
     const req = row.mappingId
       ? api.put(`/admin/sales-email/${row.mappingId}`, { plt_email: email })
@@ -81,10 +82,10 @@ function AdminSalesEmails() {
   }
 
   const handleClear = (row) => {
-    if (!row.mappingId) return
-    if (!window.confirm(`确定清除【${row.name}】的 plt 邮箱配置？`)) return
+    if (!window.confirm(`确定清除【${row.name}】？该条将从表格中移除，plt 邮箱配置也会被删除。`)) return
+    setMessage('')
     api
-      .delete(`/admin/sales-email/${row.mappingId}`)
+      .delete(`/admin/sales-email/sales/${row.id}`)
       .then(() => fetchData())
       .catch((err) => {
         const d = err.response?.data?.detail
@@ -96,7 +97,7 @@ function AdminSalesEmails() {
     <section className="section admin-block">
       <h2 className="section-title">销售邮箱</h2>
       <p className="text-muted text-sm mb-4">
-        有销售注册后会自动出现在下表中，可在此为每个销售配置或更新对应的 pltplt 发件CC邮箱。
+        销售注册后会自动出现在下表中，填写或修改 pltplt 邮箱后更新邮箱配置；点「清除」会从表格中移除此条并删除 plt 邮箱配置。
       </p>
       {loading ? (
         <p className="text-muted">加载中…</p>
@@ -132,13 +133,11 @@ function AdminSalesEmails() {
                   </td>
                   <td className="text-right">
                     <button type="button" className="btn" onClick={() => handleSave(row)}>
-                      {row.mappingId ? '保存' : '创建'}
+                      保存
                     </button>
-                    {row.mappingId && (
-                      <button type="button" className="btn" onClick={() => handleClear(row)}>
-                        清除
-                      </button>
-                    )}
+                    <button type="button" className="btn" onClick={() => handleClear(row)}>
+                      清除
+                    </button>
                   </td>
                 </tr>
               ))}

@@ -16,10 +16,44 @@ from sqlalchemy.orm import Session
 from app.config import settings
 from app.database import get_db, SessionLocal
 from app.dependencies import CurrentUser
-from app.models import CustomerList, EmailImage, EmailRecord, EmailTemplate, SendSchedule, User
+from app.models import CustomerList, EmailImage, EmailRecord, EmailTemplate, SalesPltEmail, SendSchedule, User
 from app.services.ai_content_service import get_content_for_preview
+from app.services.app_logger import (
+  log_batch_send_created,
+  log_email_failed,
+  log_email_sent,
+  log_schedule_cancelled,
+  log_schedule_created,
+)
 
 router = APIRouter(prefix="/send", tags=["send"])
+
+
+def _get_cc_email_for_sales(db: Session, user: User) -> str | None:
+  """获取销售发件时的 CC 邮箱：优先使用管理员配置的 plt 邮箱，否则用注册时的 cc_email。"""
+  m = db.query(SalesPltEmail).filter(SalesPltEmail.sales_id == user.id).first()
+  if m and m.plt_email:
+    return (m.plt_email or "").strip() or None
+  return (user.cc_email or "").strip() or None
+
+
+def _resolve_template_and_image_names(
+  db: Session,
+  template_id: int | None,
+  image_ids: list[int],
+) -> tuple[str | None, list[str]]:
+  """解析模版名称与图片名称，供日志可读。"""
+  template_name = None
+  if template_id:
+    t = db.query(EmailTemplate).filter(EmailTemplate.id == template_id).first()
+    if t:
+      template_name = t.name
+  image_names = []
+  if image_ids:
+    rows = db.query(EmailImage).filter(EmailImage.id.in_(image_ids)).all()
+    id_to_name = {r.id: (r.name or Path(r.file_path).name) for r in rows}
+    image_names = [id_to_name.get(i, str(i)) for i in image_ids]
+  return template_name, image_names
 
 
 class SendTestRequest(BaseModel):
@@ -178,9 +212,20 @@ def send_test_email(
     )
 
   _ensure_smtp_config()
-  cc_email = current_user.cc_email or None
+  cc_email = _get_cc_email_for_sales(db, current_user)
   attachments = _build_attachments_from_image_ids(db, payload.image_ids or [])
-  _send_smtp_email(to_email, payload.subject, payload.content, cc_email=cc_email, attachments=attachments)
+  try:
+    _send_smtp_email(to_email, payload.subject, payload.content, cc_email=cc_email, attachments=attachments)
+  except HTTPException as e:
+    detail = e.detail if isinstance(e.detail, str) else getattr(e.detail, "message", str(e.detail))
+    log_email_failed(current_user.name, current_user.login, to_email, detail)
+    raise
+  log_email_sent(
+    current_user.name, current_user.login,
+    to_email, cc_email, settings.smtp_sender or settings.smtp_user,
+    payload.subject or "邮件预览测试", payload.content or "",
+    [a[0] for a in attachments],
+  )
 
   # 记录发送日志
   rec = EmailRecord(
@@ -229,7 +274,7 @@ def _run_batch_send(sales_id: int, template_id: int | None, image_ids: list[int]
       .order_by(CustomerList.id)
       .all()
     )
-    cc_email = user.cc_email or None
+    cc_email = _get_cc_email_for_sales(db, user)
     from_email = settings.smtp_sender or settings.smtp_user
 
     for cust in customers:
@@ -262,12 +307,20 @@ def _run_batch_send(sales_id: int, template_id: int | None, image_ids: list[int]
 
       try:
         _send_smtp_email(to_email, subject, content, cc_email=cc_email, attachments=attachments)
+        log_email_sent(
+          user.name, user.login,
+          to_email, cc_email, from_email,
+          subject, content or "",
+          [a[0] for a in attachments],
+        )
         rec.status = "sent"
         rec.subject = subject
         rec.content = content or ""
         rec.sent_at = datetime.now(timezone.utc)
-      except HTTPException:
+      except HTTPException as e:
         # 单封失败：保留队列记录，并标记为已发送但附上错误信息，避免阻塞队列
+        detail = e.detail if isinstance(e.detail, str) else getattr(e.detail, "message", str(e.detail))
+        log_email_failed(user.name, user.login, to_email, detail)
         rec.status = "sent"
         rec.subject = subject or rec.subject
         rec.content = (content or "") + "\n\n[发送失败，详情见服务端日志]"
@@ -294,7 +347,7 @@ def _create_queued_records_for_sales(db: Session, sales_id: int, image_ids: list
     .all()
   )
   from_email = settings.smtp_sender or settings.smtp_user
-  cc_email = user.cc_email or None
+  cc_email = _get_cc_email_for_sales(db, user)
   n = 0
   for cust in customers:
     to_email = (cust.email or "").strip()
@@ -328,6 +381,8 @@ def start_batch_send(
 
   n = _create_queued_records_for_sales(db, current_user.id, payload.image_ids or [])
   _global_pending_emails += n
+  tpl_name, img_names = _resolve_template_and_image_names(db, payload.template_id, payload.image_ids or [])
+  log_batch_send_created(current_user.name, current_user.login, tpl_name, img_names)
 
   q = db.query(EmailRecord).filter(EmailRecord.status == "queued")
   if current_user.role != "admin":
@@ -420,6 +475,12 @@ def create_schedule(
   db.add(row)
   db.commit()
   db.refresh(row)
+  tpl_name, img_names = _resolve_template_and_image_names(db, payload.template_id, payload.image_ids or [])
+  log_schedule_created(
+    current_user.name, current_user.login,
+    recurrence, day_of_week_val, day_of_month_val, time_str,
+    tpl_name, img_names,
+  )
   return {
     "id": row.id,
     "recurrence_type": row.recurrence_type,
@@ -488,9 +549,19 @@ def cancel_schedule(
     raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="无权操作该计划")
   if row.status != "active":
     raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="只能取消进行中的计划")
+  owner = db.query(User).filter(User.id == row.sales_id).first()
+  owner_name = owner.name if owner else ""
+  rt = getattr(row, "recurrence_type", "week")
+  if rt == "week":
+    days = "周一,周二,周三,周四,周五,周六,周日"
+    day_desc = days.split(",")[row.day_of_week] if row.day_of_week is not None else "?"
+  else:
+    day_desc = f"每月{row.day_of_month}日" if getattr(row, "day_of_month", None) else "?"
+  schedule_desc = f"{day_desc} {row.time} (计划ID={row.id})"
   row.status = "cancelled"
   db.add(row)
   db.commit()
+  log_schedule_cancelled(current_user.name, current_user.login, owner_name, schedule_desc)
   return {"ok": True, "detail": "已取消计划"}
 
 
