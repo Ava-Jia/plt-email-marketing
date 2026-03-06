@@ -25,24 +25,25 @@ _scheduler = BackgroundScheduler()
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
-    # 启动时：若无任何用户则创建默认管理员（仅开发/首次部署方便）
+    # 先确保表存在（删除 db 后首次启动无表会报错）
+    Base.metadata.create_all(bind=engine)
+    # 若无任何用户则创建默认管理员（仅开发/首次部署方便）
     db = SessionLocal()
     try:
         if db.query(User).first() is None:
             admin = User(
                 name="管理员",
                 login="admin",
-                password_hash=hash_password("admin123"),
+                password_hash=hash_password("Pltplt2026"),
                 role="admin",
             )
             db.add(admin)
             db.commit()
     finally:
         db.close()
-    # 确保上传目录与表存在
+    # 确保上传目录存在
     root = Path(__file__).resolve().parent.parent
     (root / settings.upload_dir / "images").mkdir(parents=True, exist_ok=True)
-    Base.metadata.create_all(bind=engine)
     # 简单迁移：为 email_records 表补充 status/sent_at 列（若不存在）
     with engine.begin() as conn:
         info = conn.exec_driver_sql("PRAGMA table_info(email_records)").fetchall()

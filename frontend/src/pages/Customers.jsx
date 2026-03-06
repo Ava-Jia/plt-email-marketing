@@ -119,7 +119,7 @@ export default function Customers() {
     <div>
       <h1 className="page-title">客户管理</h1>
       <p className="page-desc">
-        上传 Excel 或 CSV 将<strong>全覆盖</strong>当前客户列表，请先下载模板填写后上传。
+        上传 Excel 或 CSV 将<strong>全覆盖</strong>当前客户列表，请先下载模板或下载当前客户列表，填写后上传。
       </p>
 
       <section className="section">

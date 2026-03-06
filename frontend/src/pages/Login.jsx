@@ -149,7 +149,7 @@ export default function Login() {
               注册
             </button>
             <br />
-            默认管理员：admin / admin123
+            默认管理员：admin / Pltplt2026
           </>
         )}
       </p>
