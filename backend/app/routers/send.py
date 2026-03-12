@@ -1,6 +1,7 @@
 """发送相关接口：测试发送 + 批量发送（SMTP + 限频）+ 循环发送计划。"""
 from datetime import datetime, timedelta, timezone
 from email.message import EmailMessage
+from email.utils import formatdate, make_msgid
 from pathlib import Path
 import json
 import mimetypes
@@ -57,7 +58,7 @@ def _resolve_template_and_image_names(
 
 
 class SendTestRequest(BaseModel):
-  to_email: str
+  to_emails: list[str]  # 测试收件人邮箱，一个或多个，与客户表无关
   subject: str
   content: str
   image_ids: list[int] | None = None
@@ -66,6 +67,7 @@ class SendTestRequest(BaseModel):
 class BatchSendRequest(BaseModel):
   template_id: int | None = None
   image_ids: list[int] | None = None
+  subject: str | None = None  # 邮件主题，为空则用模版名
 
 
 class ScheduleCreateRequest(BaseModel):
@@ -76,6 +78,7 @@ class ScheduleCreateRequest(BaseModel):
   repeat_count: int = 1
   template_id: int | None = None
   image_ids: list[int] | None = None  # 图片物料 id 列表，与预览所选一致
+  subject: str | None = None  # 邮件主题，为空则用模版名
 
 
 class ScheduleCancelRequest(BaseModel):
@@ -85,7 +88,28 @@ class ScheduleCancelRequest(BaseModel):
 _last_send_per_user: dict[int, datetime] = {}
 _last_send_global: datetime | None = None
 _global_pending_emails: int = 0
-RATE_LIMIT_SECONDS = 60
+RATE_LIMIT_SECONDS = 30
+# 严格全局串行：所有批次/计划发送共享同一把锁，避免多人同时触发时并发发送带来的风控风险
+_global_send_lock = threading.Lock()
+
+
+@router.get("/queue/status")
+def get_queue_status(
+  current_user: CurrentUser,
+  db: Session = Depends(get_db),
+):
+  """查询当前队列状态（真实 DB 统计）。用于前端展示排队进度/预计等待时间。"""
+  q = db.query(EmailRecord).filter(EmailRecord.status == "queued")
+  queued_global = q.count()
+  queued_mine = q.filter(EmailRecord.sales_id == current_user.id).count()
+  # 严格全局串行 + 全局限速：预计分钟数 = 向上取整(queued_global * RATE_LIMIT_SECONDS / 60)
+  eta_minutes = (queued_global * RATE_LIMIT_SECONDS + 59) // 60
+  return {
+    "queued_global": queued_global,
+    "queued_mine": queued_mine,
+    "rate_limit_seconds": RATE_LIMIT_SECONDS,
+    "eta_minutes": eta_minutes,
+  }
 
 
 def _ensure_smtp_config() -> None:
@@ -126,7 +150,15 @@ def _build_attachments_from_image_ids(
       continue
     ctype, _ = mimetypes.guess_type(str(full_path))
     mimetype = ctype or "application/octet-stream"
-    filename = img.name or full_path.name
+    # EmailImage.name 来自原始文件名去后缀（admin_images.py），若直接用会导致附件无后缀难以打开
+    raw_name = (img.name or "").strip()
+    if raw_name:
+      filename = raw_name if Path(raw_name).suffix else f"{raw_name}{full_path.suffix}"
+      # 极端情况：full_path 没有后缀，则回退用真实文件名
+      if not Path(filename).suffix:
+        filename = full_path.name
+    else:
+      filename = full_path.name
     attachments.append((filename, mimetype, data))
   return attachments
 
@@ -140,7 +172,7 @@ def _send_smtp_email(
 ) -> None:
   global _last_send_global
 
-  # 全局限速：任意销售的任意邮件，1 分钟 1 封
+  # 全局限速：任意销售的任意邮件，30 秒 1 封
   now = datetime.now(timezone.utc)
   if _last_send_global is not None:
     delta = (now - _last_send_global).total_seconds()
@@ -151,6 +183,9 @@ def _send_smtp_email(
   msg["Subject"] = subject or "邮件预览测试"
   msg["From"] = settings.smtp_sender or settings.smtp_user
   msg["To"] = to_email
+  # 显式设置 Date/Message-ID，降低部分邮箱客户端/网关的合并或去重概率
+  msg["Date"] = formatdate(localtime=True)
+  msg["Message-ID"] = make_msgid()
   if cc_email:
     msg["Cc"] = cc_email
   msg.set_content(content or "", subtype="plain", charset="utf-8")
@@ -189,12 +224,12 @@ def send_test_email(
   current_user: CurrentUser,
   db: Session = Depends(get_db),
 ):
-  """发送测试邮件：To 为客户邮箱，Cc 为当前销售的 cc 邮箱；限频：每位销售每分钟 1 封。"""
-  to_email = (payload.to_email or "").strip()
-  if not to_email:
+  """发送测试邮件：收件人由请求体 to_emails 指定（与客户表无关），Cc 为当前销售的 cc 邮箱；限频：每位销售每 30 秒 1 封。"""
+  emails = [(e or "").strip() for e in (payload.to_emails or []) if (e or "").strip()]
+  if not emails:
     raise HTTPException(
       status_code=status.HTTP_400_BAD_REQUEST,
-      detail="缺少客户邮箱地址。",
+      detail="请填写至少一个测试收件人邮箱。",
     )
   if not payload.content.strip():
     raise HTTPException(
@@ -202,68 +237,97 @@ def send_test_email(
       detail="邮件内容不能为空。",
     )
 
-  # 限频：每位销售每分钟 1 封
+  # 限频：仅在本请求开始时检查一次（本请求内多封会按全局限速依次发送）
   now = datetime.now(timezone.utc)
   last = _last_send_per_user.get(current_user.id)
   if last and (now - last) < timedelta(seconds=RATE_LIMIT_SECONDS):
     raise HTTPException(
       status_code=status.HTTP_429_TOO_MANY_REQUESTS,
-      detail="发送太频繁，每分钟仅可发送 1 封邮件。",
+      detail="发送太频繁，每 30 秒仅可发送 1 封邮件。",
     )
 
   _ensure_smtp_config()
   cc_email = _get_cc_email_for_sales(db, current_user)
   attachments = _build_attachments_from_image_ids(db, payload.image_ids or [])
-  try:
-    _send_smtp_email(to_email, payload.subject, payload.content, cc_email=cc_email, attachments=attachments)
-  except HTTPException as e:
-    detail = e.detail if isinstance(e.detail, str) else getattr(e.detail, "message", str(e.detail))
-    log_email_failed(current_user.name, current_user.login, to_email, detail)
-    raise
-  log_email_sent(
-    current_user.name, current_user.login,
-    to_email, cc_email, settings.smtp_sender or settings.smtp_user,
-    payload.subject or "邮件预览测试", payload.content or "",
-    [a[0] for a in attachments],
-  )
+  subject = payload.subject or "邮件预览测试"
+  content = payload.content or ""
+  sent_list: list[str] = []
+  failed_list: list[tuple[str, str]] = []  # (email, detail)
 
-  # 记录发送日志
-  rec = EmailRecord(
-      sales_id=current_user.id,
-      to_email=to_email,
-      from_email=settings.smtp_sender or settings.smtp_user,
-      cc_email=cc_email,
-      subject=payload.subject or "",
-      content=payload.content or "",
-      image_ids=json.dumps(payload.image_ids or []),
-      status="sent",
-      sent_at=now,
-  )
-  db.add(rec)
-  db.commit()
+  for to_email in emails:
+    try:
+      _send_smtp_email(to_email, subject, content, cc_email=cc_email, attachments=attachments)
+      log_email_sent(
+        current_user.name, current_user.login,
+        to_email, cc_email, settings.smtp_sender or settings.smtp_user,
+        subject, content,
+        [a[0] for a in attachments],
+      )
+      rec = EmailRecord(
+        sales_id=current_user.id,
+        to_email=to_email,
+        from_email=settings.smtp_sender or settings.smtp_user,
+        cc_email=cc_email,
+        subject=subject,
+        content=content,
+        image_ids=json.dumps(payload.image_ids or []),
+        status="sent",
+        sent_at=datetime.now(timezone.utc),
+      )
+      db.add(rec)
+      db.commit()
+      sent_list.append(to_email)
+    except HTTPException as e:
+      detail = e.detail if isinstance(e.detail, str) else getattr(e.detail, "message", str(e.detail))
+      log_email_failed(current_user.name, current_user.login, to_email, detail)
+      failed_list.append((to_email, detail))
+    except Exception as e:  # pragma: no cover
+      detail = str(e)
+      log_email_failed(current_user.name, current_user.login, to_email, detail)
+      failed_list.append((to_email, detail))
 
-  _last_send_per_user[current_user.id] = now
-  return {"status": "ok", "to": to_email, "cc": cc_email}
+  if sent_list:
+    _last_send_per_user[current_user.id] = datetime.now(timezone.utc)
+
+  return {
+    "status": "ok",
+    "sent": sent_list,
+    "failed": [{"email": em, "detail": d} for em, d in failed_list],
+    "cc": cc_email,
+  }
 
 
-def _run_batch_send(sales_id: int, template_id: int | None, image_ids: list[int] | None = None) -> None:
-  """后台任务：对当前销售的全部客户依次发送邮件，每封间隔 60 秒（全局限速共享），可携带图片附件。"""
+def _run_batch_send(
+  sales_id: int,
+  template_id: int | None,
+  image_ids: list[int] | None = None,
+  schedule_id: int | None = None,
+  custom_subject: str | None = None,
+) -> None:
+  """后台任务：对当前销售的全部客户依次发送邮件，每封间隔 30 秒（全局限速共享），可携带图片附件。
+  custom_subject：若传入则作为邮件主题前缀（每封为 custom_subject - 客户名），否则用模版名。"""
   global _global_pending_emails
   db = SessionLocal()
+  schedule_updated = False
   try:
+    # 严格全局串行：同一时间仅允许一个发送线程进入发送循环
+    _global_send_lock.acquire()
     user = db.query(User).filter(User.id == sales_id).first()
     if not user:
+      if schedule_id is not None:
+        _mark_schedule_failed(schedule_id)
       return
 
     # 读取模版内容与名称（用于主题）
     template_content = ""
-    subject_prefix = "营销邮件"
+    subject_prefix = (custom_subject or "").strip() or "营销邮件"
     if template_id:
       tpl = db.query(EmailTemplate).filter(EmailTemplate.id == template_id).first()
       if tpl:
         template_content = tpl.content or ""
-        if tpl.name:
-          subject_prefix = tpl.name
+        # 未传入自定义 subject 时，才回退使用模版名
+        if subject_prefix == "营销邮件" and (tpl.name or "").strip():
+          subject_prefix = tpl.name.strip()
 
     _ensure_smtp_config()
     attachments = _build_attachments_from_image_ids(db, image_ids or [])
@@ -288,7 +352,7 @@ def _run_batch_send(sales_id: int, template_id: int | None, image_ids: list[int]
         company_traits=(cust.company_traits or "").strip() or None,
         template=template_content or None,
       )
-      subject = f"{subject_prefix} - {cust.customer_name}" if subject_prefix else "营销邮件"
+      subject = subject_prefix if subject_prefix else "营销邮件"
 
       # 找到一条排队中的记录
       rec = (
@@ -331,6 +395,54 @@ def _run_batch_send(sales_id: int, template_id: int | None, image_ids: list[int]
 
       # 已发送一封，更新全局待发送数
       _global_pending_emails = max(0, _global_pending_emails - 1)
+
+    # 仅当完整跑完发送循环后才更新计划状态（未抛异常、未提前 return）
+    if schedule_id is not None:
+      _update_schedule_after_batch_done(schedule_id)
+      schedule_updated = True
+  except Exception:
+    # 例如 _ensure_smtp_config() 失败或其它异常：不更新计划，保持 sending，便于排查
+    if schedule_id is not None and not schedule_updated:
+      _mark_schedule_failed(schedule_id)
+  finally:
+    try:
+      if _global_send_lock.locked():
+        _global_send_lock.release()
+    except RuntimeError:
+      pass
+    db.close()
+
+
+def _update_schedule_after_batch_done(schedule_id: int) -> None:
+  """批量发送线程结束后调用：将计划的 current_count +1，status 置为 completed 或 active（仅当当前为 sending 时更新）。"""
+  db = SessionLocal()
+  try:
+    row = db.query(SendSchedule).filter(SendSchedule.id == schedule_id).first()
+    if not row or row.status != "sending":
+      return
+    new_count = (row.current_count or 0) + 1
+    new_status = "completed" if new_count >= (row.repeat_count or 1) else "active"
+    db.query(SendSchedule).filter(SendSchedule.id == schedule_id).update(
+      {"current_count": new_count, "status": new_status},
+      synchronize_session=False,
+    )
+    db.commit()
+  finally:
+    db.close()
+
+
+def _mark_schedule_failed(schedule_id: int) -> None:
+  """发送过程发生异常时调用：将计划置为 failed，便于用户区分“未发就结束”的情况。"""
+  db = SessionLocal()
+  try:
+    row = db.query(SendSchedule).filter(SendSchedule.id == schedule_id).first()
+    if not row or row.status != "sending":
+      return
+    db.query(SendSchedule).filter(SendSchedule.id == schedule_id).update(
+      {"status": "failed"},
+      synchronize_session=False,
+    )
+    db.commit()
   finally:
     db.close()
 
@@ -376,25 +488,25 @@ def start_batch_send(
   current_user: CurrentUser,
   db: Session = Depends(get_db),
 ):
-  """开始批量发送：对当前销售的客户表按顺序依次发送，每分钟 1 封（全销售共享限速队列）。"""
+  """开始批量发送：对当前销售的客户表按顺序依次发送，每 30 秒 1 封（全销售共享限速队列）。"""
   global _global_pending_emails
 
   n = _create_queued_records_for_sales(db, current_user.id, payload.image_ids or [])
   _global_pending_emails += n
   tpl_name, img_names = _resolve_template_and_image_names(db, payload.template_id, payload.image_ids or [])
-  log_batch_send_created(current_user.name, current_user.login, tpl_name, img_names)
+  log_batch_send_created(current_user.name, current_user.login, tpl_name, img_names, (payload.subject or "").strip() or None)
 
-  q = db.query(EmailRecord).filter(EmailRecord.status == "queued")
-  if current_user.role != "admin":
-    q = q.filter(EmailRecord.sales_id == current_user.id)
-  queued_count = q.count()
-
-  background_tasks.add_task(_run_batch_send, current_user.id, payload.template_id, payload.image_ids or [])
+  background_tasks.add_task(
+    _run_batch_send,
+    current_user.id,
+    payload.template_id,
+    payload.image_ids or [],
+    None,
+    (payload.subject or "").strip() or None,
+  )
   return {
     "status": "accepted",
     "detail": "已开始后台群发，将按队列顺序依次发送全部客户。你可以在「邮件记录」查看进度。",
-    "queued": queued_count,
-    "eta_minutes": queued_count,
   }
 
 
@@ -471,6 +583,7 @@ def create_schedule(
     status="active",
     template_id=payload.template_id,
     image_ids=image_ids_json,
+    subject=(payload.subject or "").strip() or None,
   )
   db.add(row)
   db.commit()
@@ -480,6 +593,7 @@ def create_schedule(
     current_user.name, current_user.login,
     recurrence, day_of_week_val, day_of_month_val, time_str,
     tpl_name, img_names,
+    (payload.subject or "").strip() or None,
   )
   return {
     "id": row.id,
@@ -492,6 +606,7 @@ def create_schedule(
     "status": row.status,
     "template_id": row.template_id,
     "image_ids": payload.image_ids,
+    "subject": (payload.subject or "").strip() or None,
     "created_at": row.created_at.isoformat() if row.created_at else None,
   }
 
@@ -530,6 +645,7 @@ def list_schedules(
       "status": rec.status,
       "template_id": rec.template_id,
       "image_ids": image_ids,
+      "subject": getattr(rec, "subject", None),
       "created_at": rec.created_at.isoformat() if rec.created_at else None,
     })
   return {"items": items}
@@ -547,8 +663,8 @@ def cancel_schedule(
     raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="计划不存在")
   if current_user.role != "admin" and row.sales_id != current_user.id:
     raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="无权操作该计划")
-  if row.status != "active":
-    raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="只能取消进行中的计划")
+  if row.status not in ("active", "sending", "failed"):
+    raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="只能取消进行中、发送中或已失败的计划")
   owner = db.query(User).filter(User.id == row.sales_id).first()
   owner_name = owner.name if owner else ""
   rt = getattr(row, "recurrence_type", "week")
@@ -561,7 +677,7 @@ def cancel_schedule(
   row.status = "cancelled"
   db.add(row)
   db.commit()
-  log_schedule_cancelled(current_user.name, current_user.login, owner_name, schedule_desc)
+  log_schedule_cancelled(current_user.name, current_user.login, owner_name, schedule_desc, (getattr(row, "subject", None) or "").strip() or None)
   return {"ok": True, "detail": "已取消计划"}
 
 
@@ -616,14 +732,22 @@ def check_and_run_schedules() -> None:
           image_ids = None
       n = _create_queued_records_for_sales(db, sales_id, image_ids or [])
       _global_pending_emails += n
-      new_count = current_count + 1
-      new_status = "completed" if new_count >= repeat_count else "active"
+      # 先置为 sending，避免下一分钟定时任务再次命中同一计划
       db.query(SendSchedule).filter(SendSchedule.id == schedule_id).update(
-        {"current_count": new_count, "status": new_status},
+        {"status": "sending"},
         synchronize_session=False,
       )
       db.commit()
-      threading.Thread(target=_run_batch_send, args=(sales_id, template_id, image_ids or []), daemon=True).start()
+      # 计划状态改为在 _run_batch_send 全部发完后由 _update_schedule_after_batch_done 更新为 completed/active
+      threading.Thread(
+        target=_run_batch_send,
+        args=(sales_id, template_id, image_ids or []),
+        kwargs={
+          "schedule_id": schedule_id,
+          "custom_subject": (getattr(row, "subject", None) or "").strip() or None,
+        },
+        daemon=True,
+      ).start()
   finally:
     db.close()
 

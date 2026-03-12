@@ -88,6 +88,8 @@ def list_records(
     from_email: str | None = None,
     cc_email: str | None = None,
     sent_date: str | None = None,
+    sent_date_from: str | None = None,
+    sent_date_to: str | None = None,
 ):
     """当前用户（销售：仅本人；管理员：全部）的邮件记录列表，支持多列筛选。"""
     if page < 1:
@@ -115,6 +117,7 @@ def list_records(
         query = query.filter(EmailRecord.from_email == from_email)
     if cc_email:
         query = query.filter(EmailRecord.cc_email == cc_email)
+    # 兼容旧的 sent_date（单日），以及新的 sent_date_from/sent_date_to（区间）
     if sent_date:
         try:
             y, m, d = map(int, sent_date.split("-"))
@@ -129,6 +132,31 @@ def list_records(
             )
         except (ValueError, TypeError):
             pass
+    else:
+        start_utc = None
+        end_utc = None
+        if sent_date_from:
+            try:
+                y, m, d = map(int, sent_date_from.split("-"))
+                start_beijing = datetime(y, m, d, 0, 0, 0, tzinfo=BEIJING)
+                start_utc = start_beijing.astimezone(timezone.utc)
+            except (ValueError, TypeError):
+                start_utc = None
+        if sent_date_to:
+            try:
+                y, m, d = map(int, sent_date_to.split("-"))
+                # 结束日期按“当天 23:59:59.999”处理：区间为 [from, to+1天)
+                end_beijing = datetime(y, m, d, 0, 0, 0, tzinfo=BEIJING) + timedelta(days=1)
+                end_utc = end_beijing.astimezone(timezone.utc)
+            except (ValueError, TypeError):
+                end_utc = None
+        if start_utc or end_utc:
+            conds = [EmailRecord.status == "sent"]
+            if start_utc:
+                conds.append(EmailRecord.sent_at >= start_utc)
+            if end_utc:
+                conds.append(EmailRecord.sent_at < end_utc)
+            query = query.filter(*conds)
 
     total = query.count()
     rows = (

@@ -16,14 +16,14 @@ export default function Records() {
     to_email: '',
     from_email: '',
     cc_email: '',
-    sent_date: '',
+    sent_date_from: '',
+    sent_date_to: '',
   })
   const [filterOptions, setFilterOptions] = useState({
     statuses: [],
     to_emails: [],
     from_emails: [],
     cc_emails: [],
-    sent_dates: [],
   })
 
   const fetchFilters = () => {
@@ -33,7 +33,6 @@ export default function Records() {
         to_emails: data.to_emails || [],
         from_emails: data.from_emails || [],
         cc_emails: data.cc_emails || [],
-        sent_dates: data.sent_dates || [],
       })
     }).catch(() => {})
   }
@@ -51,7 +50,8 @@ export default function Records() {
       to_email: f.to_email || undefined,
       from_email: f.from_email || undefined,
       cc_email: f.cc_email || undefined,
-      sent_date: f.sent_date || undefined,
+      sent_date_from: f.sent_date_from || undefined,
+      sent_date_to: f.sent_date_to || undefined,
     }
     api
       .get('/records', { params })
@@ -96,14 +96,16 @@ export default function Records() {
       to_email: '',
       from_email: '',
       cc_email: '',
-      sent_date: '',
+      sent_date_from: '',
+      sent_date_to: '',
     })
     fetchList(1, query, {
       status: '',
       to_email: '',
       from_email: '',
       cc_email: '',
-      sent_date: '',
+      sent_date_from: '',
+      sent_date_to: '',
     })
   }
 
@@ -188,10 +190,21 @@ export default function Records() {
   const formatSentAt = (value) => {
     if (!value) return ''
     if (typeof value === 'string') {
-      const [datePart, timeWithZone] = value.split('T')
-      if (!timeWithZone) return value
-      const timePart = timeWithZone.replace(/Z$/, '').split(/[+-]/)[0]
-      return `${datePart} ${timePart}`
+      const s = value.trim()
+      if (s.includes('T')) {
+        const [datePart, timeWithZone] = s.split('T')
+        if (!timeWithZone) return s
+        const timePart = timeWithZone.replace(/Z$/, '').split(/[+-]/)[0]
+        const timeToSecond = timePart.includes('.') ? timePart.split('.')[0] : timePart
+        return `${datePart} ${timeToSecond}`
+      }
+      if (s.includes(' ')) {
+        const [datePart, timePart] = s.split(' ')
+        if (!timePart) return s
+        const timeToSecond = timePart.includes('.') ? timePart.split('.')[0] : timePart
+        return `${datePart} ${timeToSecond}`
+      }
+      return s
     }
     return String(value)
   }
@@ -209,7 +222,7 @@ export default function Records() {
           <input
             type="text"
             className="input input-width-sm"
-            placeholder="按收件人 / 主题 / 内容搜索"
+            placeholder="输入邮箱 / 主题 / 内容"
             value={query}
             onChange={(e) => setQuery(e.target.value)}
           />
@@ -240,17 +253,21 @@ export default function Records() {
         </label>
         <label className="form-label">
           发送时间
-          <select
-            value={filters.sent_date}
-            onChange={(ev) => applyFilter('sent_date', ev.target.value)}
-            className="select input-sm"
-            style={{ minWidth: 120 }}
-          >
-            <option value="">全部</option>
-            {filterOptions.sent_dates.map((d) => (
-              <option key={d} value={d}>{d}</option>
-            ))}
-          </select>
+          <div className="flex items-center gap-1">
+            <input
+              type="date"
+              className="input input-sm"
+              value={filters.sent_date_from}
+              onChange={(ev) => applyFilter('sent_date_from', ev.target.value)}
+            />
+            <span>至</span>
+            <input
+              type="date"
+              className="input input-sm"
+              value={filters.sent_date_to}
+              onChange={(ev) => applyFilter('sent_date_to', ev.target.value)}
+            />
+          </div>
         </label>
         <label className="form-label">
           To（客户邮箱）
@@ -294,7 +311,7 @@ export default function Records() {
             ))}
           </select>
         </label>
-        {(filters.status || filters.sent_date || filters.to_email || filters.from_email || filters.cc_email) && (
+        {(filters.status || filters.sent_date_from || filters.sent_date_to || filters.to_email || filters.from_email || filters.cc_email) && (
           <button type="button" className="btn" onClick={clearAllFilters}>清空筛选</button>
         )}
       </section>
@@ -376,13 +393,18 @@ export default function Records() {
                       <td>{row.from_email}</td>
                       <td>{row.cc_email || '—'}</td>
                       <td>
-                        <div className="cell-ellipsis" title={Array.isArray(row.image_names) && row.image_names.length ? `图片：${row.image_names.join('、')}` : undefined}>
-                          {short}
-                        </div>
+                        {expandedId !== row.id && (
+                          <div className="cell-ellipsis" title={Array.isArray(row.image_names) && row.image_names.length ? `图片：${row.image_names.join('、')}` : undefined}>
+                            {short}
+                          </div>
+                        )}
                         {expandedId === row.id && (
                           <div className="expand-content">
                             <div style={{ fontWeight: 500, marginBottom: 4 }}>{row.subject || '（无主题）'}</div>
                             <div>{row.content || '（无内容）'}</div>
+                            <div className="text-muted text-sm mt-2">
+                              附件：{Array.isArray(row.image_names) && row.image_names.length ? row.image_names.join('、') : '无'}
+                            </div>
                           </div>
                         )}
                       </td>
@@ -437,9 +459,16 @@ export default function Records() {
             <button type="button" className="btn" onClick={() => fetchList(list.page + 1, query)} disabled={!canNext || loading}>
               下一页
             </button>
-            {(filters.status || filters.sent_date || filters.to_email || filters.from_email || filters.cc_email) && (
+            {(filters.status || filters.sent_date_from || filters.sent_date_to || filters.to_email || filters.from_email || filters.cc_email) && (
               <span className="text-muted" style={{ marginLeft: 8, fontSize: 12 }}>
-                当前筛选：{[filters.status && STATUS_LABELS[filters.status], filters.sent_date && `发送时间=${filters.sent_date}`, filters.to_email && 'To', filters.from_email && 'From', filters.cc_email && 'Cc'].filter(Boolean).join('、')}
+                当前筛选：{[
+                  filters.status && STATUS_LABELS[filters.status],
+                  (filters.sent_date_from || filters.sent_date_to) &&
+                    `发送时间=${filters.sent_date_from || '最早'}~${filters.sent_date_to || '最晚'}`,
+                  filters.to_email && 'To',
+                  filters.from_email && 'From',
+                  filters.cc_email && 'Cc',
+                ].filter(Boolean).join('、')}
               </span>
             )}
           </div>

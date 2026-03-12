@@ -24,6 +24,12 @@ def create_template(
     current_user: User = Depends(require_admin),
     db: Session = Depends(get_db),
 ):
+    name = (data.name or "").strip()
+    if not name:
+        raise HTTPException(status_code=400, detail="模版名称不能为空")
+    exists = db.query(EmailTemplate).filter(EmailTemplate.name == name).first()
+    if exists:
+        raise HTTPException(status_code=400, detail="模版名称已存在，请换一个名称")
     row = EmailTemplate(name=data.name, content=data.content)
     db.add(row)
     db.commit()
@@ -42,7 +48,17 @@ def update_template(
     if not row:
         raise HTTPException(status_code=404, detail="模版不存在")
     if data.name is not None:
-        row.name = data.name
+        name = (data.name or "").strip()
+        if not name:
+            raise HTTPException(status_code=400, detail="模版名称不能为空")
+        exists = (
+            db.query(EmailTemplate)
+            .filter(EmailTemplate.name == name, EmailTemplate.id != item_id)
+            .first()
+        )
+        if exists:
+            raise HTTPException(status_code=400, detail="模版名称已存在，请换一个名称")
+        row.name = name
     if data.content is not None:
         row.content = data.content
     db.commit()

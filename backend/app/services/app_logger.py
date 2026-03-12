@@ -49,11 +49,13 @@ def log_batch_send_created(
     sales_login: str,
     template_name: str | None,
     image_names: list[str],
+    subject: str | None = None,
 ) -> None:
     """谁创建了群发任务（模版名、图片名为可读信息）"""
     tpl = f"模版={template_name}" if template_name else "无模版"
     imgs = f"图片=[{','.join(image_names)}]" if image_names else "无图片"
-    write(f"[群发任务] {sales_name}（{sales_login}）创建群发任务，{tpl}，{imgs}")
+    subj = f"主题={subject}" if (subject or "").strip() else "无主题"
+    write(f"[群发任务] {sales_name}（{sales_login}）创建群发任务，{subj}，{tpl}，{imgs}")
 
 
 def log_schedule_created(
@@ -65,6 +67,7 @@ def log_schedule_created(
     time_str: str,
     template_name: str | None,
     image_names: list[str],
+    subject: str | None = None,
 ) -> None:
     """谁创建了循环任务、任务是什么（模版名、图片名为可读信息）"""
     if recurrence_type == "week":
@@ -74,7 +77,8 @@ def log_schedule_created(
         day_desc = f"每月{day_of_month}日" if day_of_month else "?"
     tpl = f"模版={template_name}" if template_name else "无模版"
     imgs = f"图片=[{','.join(image_names)}]" if image_names else "无图片"
-    write(f"[循环任务] {sales_name}（{sales_login}）创建循环任务：{day_desc} {time_str}，{tpl}，{imgs}")
+    subj = f"主题={subject}" if (subject or "").strip() else "无主题"
+    write(f"[循环任务] {sales_name}（{sales_login}）创建循环任务：{day_desc} {time_str}，{subj}，{tpl}，{imgs}")
 
 
 def log_email_sent(
@@ -112,9 +116,11 @@ def log_schedule_cancelled(
     operator_login: str,
     schedule_owner_name: str,
     schedule_desc: str,
+    subject: str | None = None,
 ) -> None:
     """循环任务取消：谁取消了谁的计划"""
-    write(f"[循环任务取消] {operator_name}（{operator_login}）取消了 {schedule_owner_name} 的计划：{schedule_desc}")
+    subj = f"主题={subject}" if (subject or "").strip() else "无主题"
+    write(f"[循环任务取消] {operator_name}（{operator_login}）取消了 {schedule_owner_name} 的计划：{schedule_desc}，{subj}")
 
 
 def log_queued_cancelled(

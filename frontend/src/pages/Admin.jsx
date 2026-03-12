@@ -97,7 +97,7 @@ function AdminSalesEmails() {
     <section className="section admin-block">
       <h2 className="section-title">销售邮箱</h2>
       <p className="text-muted text-sm mb-4">
-        销售注册后会自动出现在下表中，填写或修改 pltplt 邮箱后更新邮箱配置；点「清除」会从表格中移除此条并删除 plt 邮箱配置。
+        销售注册后会自动出现在下表中，填写或修改 pltplt 邮箱后更新邮箱配置；点「清除」会从表格中移除此条并删除 pltplt 邮箱配置。
       </p>
       {loading ? (
         <p className="text-muted">加载中…</p>
@@ -247,23 +247,52 @@ function AdminTemplates() {
   const [loading, setLoading] = useState(true)
   const [editing, setEditing] = useState(null)
   const [form, setForm] = useState({ name: '', content: '' })
+  const [error, setError] = useState('')
+  const [page, setPage] = useState(1)
+  const pageSize = 10
 
   const fetchList = () => {
-    api.get('/admin/templates').then((r) => setList(r.data || [])).catch(() => setList([])).finally(() => setLoading(false))
+    setLoading(true)
+    api
+      .get('/admin/templates')
+      .then((r) => setList(r.data || []))
+      .catch(() => setList([]))
+      .finally(() => setLoading(false))
   }
 
   useEffect(() => {
     fetchList()
   }, [])
 
+  useEffect(() => {
+    setPage(1)
+  }, [list.length])
+
   const handleSubmit = (e) => {
     e.preventDefault()
-    if (!form.name.trim()) return
-    const body = { name: form.name.trim(), content: form.content.trim() }
+    setError('')
+    const name = form.name.trim()
+    if (!name) {
+      setError('请先填写模版名称')
+      return
+    }
+    const body = { name, content: form.content.trim() }
     if (editing) {
-      api.put(`/admin/templates/${editing.id}`, body).then(() => { setEditing(null); setForm({ name: '', content: '' }); fetchList(); })
+      api
+        .put(`/admin/templates/${editing.id}`, body)
+        .then(() => { setEditing(null); setForm({ name: '', content: '' }); fetchList(); })
+        .catch((err) => {
+          const d = err.response?.data?.detail
+          setError(typeof d === 'string' ? d : d?.message || err.message || '保存失败')
+        })
     } else {
-      api.post('/admin/templates', body).then(() => { setForm({ name: '', content: '' }); fetchList(); })
+      api
+        .post('/admin/templates', body)
+        .then(() => { setForm({ name: '', content: '' }); fetchList(); })
+        .catch((err) => {
+          const d = err.response?.data?.detail
+          setError(typeof d === 'string' ? d : d?.message || err.message || '新增失败')
+        })
     }
   }
 
@@ -274,13 +303,29 @@ function AdminTemplates() {
 
   const handleDelete = (id) => {
     if (!window.confirm('确定删除该模版？')) return
-    api.delete(`/admin/templates/${id}`).then(() => fetchList())
+    setError('')
+    api
+      .delete(`/admin/templates/${id}`)
+      .then(() => fetchList())
+      .catch((err) => {
+        const d = err.response?.data?.detail
+        setError(typeof d === 'string' ? d : d?.message || err.message || '删除失败')
+      })
   }
 
   const handleCancel = () => {
     setEditing(null)
     setForm({ name: '', content: '' })
+    setError('')
   }
+
+  const total = list.length
+  const totalPages = Math.max(1, Math.ceil(total / pageSize))
+  const safePage = Math.min(Math.max(1, page), totalPages)
+  const canPrev = safePage > 1
+  const canNext = safePage < totalPages
+  const pageStart = (safePage - 1) * pageSize
+  const pageItems = list.slice(pageStart, pageStart + pageSize)
 
   return (
     <section className="section admin-block">
@@ -313,6 +358,7 @@ function AdminTemplates() {
           <button type="button" className="btn" onClick={handleCancel}>取消</button>
         )}
       </form>
+      {error && <p className="text-error mt-2">{error}</p>}
       {loading ? (
         <p className="text-muted">加载中…</p>
       ) : list.length === 0 ? (
@@ -328,7 +374,7 @@ function AdminTemplates() {
               </tr>
             </thead>
             <tbody>
-              {list.map((t) => (
+              {pageItems.map((t) => (
                 <tr key={t.id}>
                   <td>{t.name}</td>
                   <td className="cell-ellipsis" style={{ maxWidth: 320 }}>{t.content?.slice(0, 60)}…</td>
@@ -340,6 +386,17 @@ function AdminTemplates() {
               ))}
             </tbody>
           </table>
+          <div className="flex items-center gap-3 mt-4">
+            <span className="text-muted text-sm">
+              第 {safePage} / {totalPages} 页，共 {total} 条
+            </span>
+            <button type="button" className="btn" onClick={() => setPage((p) => Math.max(1, p - 1))} disabled={!canPrev}>
+              上一页
+            </button>
+            <button type="button" className="btn" onClick={() => setPage((p) => Math.min(totalPages, p + 1))} disabled={!canNext}>
+              下一页
+            </button>
+          </div>
         </div>
       )}
     </section>

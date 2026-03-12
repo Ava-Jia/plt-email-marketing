@@ -16,7 +16,8 @@ class SendSchedule(Base):
     time = Column(String(5), nullable=False)  # "HH:MM" 北京时间
     repeat_count = Column(Integer, nullable=False, default=1)
     current_count = Column(Integer, nullable=False, default=0)
-    status = Column(String(32), nullable=False, default="active")  # active / completed / cancelled
+    status = Column(String(32), nullable=False, default="active")  # active / sending / completed / cancelled / failed
     template_id = Column(Integer, ForeignKey("email_templates.id", ondelete="SET NULL"), nullable=True, index=True)
     image_ids = Column(String(1000), nullable=True)  # JSON 数组如 "[1,2,3]" 图片物料 id
+    subject = Column(String(500), nullable=True)  # 邮件主题，为空则用模版名
     created_at = Column(DateTime(timezone=True), server_default=func.now())
