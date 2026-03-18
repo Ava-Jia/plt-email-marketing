@@ -43,7 +43,7 @@ def get_record_filters(
     """返回各列的可选筛选值（去重），供前端下拉框使用。"""
     base = _base_query(db, current_user)
 
-    statuses = ["queued", "sent"]
+    statuses = ["queued", "sent", "expired"]
     to_emails = sorted(
         x[0] for x in base.with_entities(EmailRecord.to_email).distinct().all() if x[0]
     )
@@ -56,7 +56,7 @@ def get_record_filters(
 
     sent_at_list = (
         base.with_entities(EmailRecord.sent_at)
-        .filter(EmailRecord.status == "sent", EmailRecord.sent_at.isnot(None))
+        .filter(EmailRecord.sent_at.isnot(None))
         .all()
     )
     sent_dates = []
@@ -110,7 +110,16 @@ def list_records(
         )
 
     if status:
-        query = query.filter(EmailRecord.status == status)
+        if status == "expired":
+            # 孤儿排队：queued 且创建超过 24 小时
+            threshold = datetime.now(timezone.utc) - timedelta(hours=24)
+            query = query.filter(
+                EmailRecord.status == "queued",
+                EmailRecord.sent_at.is_(None),
+                EmailRecord.created_at < threshold,
+            )
+        else:
+            query = query.filter(EmailRecord.status == status)
     if to_email:
         query = query.filter(EmailRecord.to_email == to_email)
     if from_email:
@@ -126,7 +135,7 @@ def list_records(
             start_utc = start_beijing.astimezone(timezone.utc)
             end_utc = end_beijing.astimezone(timezone.utc)
             query = query.filter(
-                EmailRecord.status == "sent",
+                EmailRecord.sent_at.isnot(None),
                 EmailRecord.sent_at >= start_utc,
                 EmailRecord.sent_at < end_utc,
             )
@@ -151,7 +160,7 @@ def list_records(
             except (ValueError, TypeError):
                 end_utc = None
         if start_utc or end_utc:
-            conds = [EmailRecord.status == "sent"]
+            conds = [EmailRecord.sent_at.isnot(None)]  # sent_at 存在即视为已发送
             if start_utc:
                 conds.append(EmailRecord.sent_at >= start_utc)
             if end_utc:
@@ -159,8 +168,9 @@ def list_records(
             query = query.filter(*conds)
 
     total = query.count()
+    # 按发送时间从新到旧排序；无 sent_at 的按 created_at，SQLite 默认 DESC 时 NULL 在最后
     rows = (
-        query.order_by(EmailRecord.created_at.desc())
+        query.order_by(EmailRecord.sent_at.desc(), EmailRecord.created_at.desc())
         .offset((page - 1) * page_size)
         .limit(page_size)
         .all()
@@ -186,9 +196,26 @@ def list_records(
         for img in img_rows:
             image_name_by_id[img.id] = img.name
 
+    now_utc = datetime.now(timezone.utc)
+    orphan_threshold = now_utc - timedelta(hours=24)
+
     items = []
     for rec, sales_name in rows:
-        sent_at_iso = _to_beijing_iso(rec.sent_at) if (rec.status == "sent" and rec.sent_at) else None
+        # sent_at 优先：有发送时间即为已发送，修复 status 未正确更新的历史数据
+        if rec.sent_at:
+            display_status = "sent"
+            sent_at_iso = _to_beijing_iso(rec.sent_at)
+        else:
+            sent_at_iso = None
+            # 长期排队且无 sent_at：视为孤儿记录，显示为「排队超时」
+            created_aware = rec.created_at
+            if created_aware and created_aware.tzinfo is None:
+                created_aware = created_aware.replace(tzinfo=timezone.utc)
+            if rec.status == "queued" and created_aware and created_aware < orphan_threshold:
+                display_status = "expired"
+            else:
+                display_status = rec.status or "sent"
+
         ids = image_ids_map.get(rec.id, [])
         image_names = [image_name_by_id.get(i, str(i)) for i in ids if i in image_name_by_id]
         items.append(
@@ -202,7 +229,7 @@ def list_records(
                 "subject": rec.subject or "",
                 "content": rec.content,
                 "image_names": image_names,
-                "status": rec.status or "sent",
+                "status": display_status,
                 "created_at": rec.created_at.isoformat() if isinstance(rec.created_at, datetime) else None,
                 "sent_at": sent_at_iso,
             }

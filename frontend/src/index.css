@@ -356,6 +356,11 @@ body {
   background: var(--color-bg);
   color: var(--color-text-muted);
 }
+.badge-expired {
+  background: var(--color-bg);
+  color: var(--color-text-muted);
+  border-color: #d1d5db;
+}
 
 /* ========== 卡片 / 区块 ========== */
 .card {

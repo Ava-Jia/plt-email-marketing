@@ -1,7 +1,9 @@
 """发送相关接口：测试发送 + 批量发送（SMTP + 限频）+ 循环发送计划。"""
+import unicodedata
 from datetime import datetime, timedelta, timezone
 from email.message import EmailMessage
 from email.utils import formatdate, make_msgid
+import html
 from pathlib import Path
 import json
 import mimetypes
@@ -12,29 +14,65 @@ import time
 
 from fastapi import APIRouter, BackgroundTasks, Depends, HTTPException, status
 from pydantic import BaseModel
+import sqlalchemy as sa
 from sqlalchemy.orm import Session
 
 from app.config import settings
 from app.database import get_db, SessionLocal
 from app.dependencies import CurrentUser
-from app.models import CustomerList, EmailImage, EmailRecord, EmailTemplate, SalesPltEmail, SendSchedule, User
+from app.models import CustomerList, EmailImage, EmailRecord, EmailTemplate, SendSchedule, User
+from app.models.email_template import STATUS_ENABLED
 from app.services.ai_content_service import get_content_for_preview
 from app.services.app_logger import (
   log_batch_send_created,
+  log_batch_send_start,
+  log_batch_skip_no_record,
   log_email_failed,
   log_email_sent,
   log_schedule_cancelled,
   log_schedule_created,
+  log_schedule_failed,
+  log_schedule_run,
 )
 
 router = APIRouter(prefix="/send", tags=["send"])
 
+SIGNATURE_TEXT = "此致\n湃乐多航运科技"
+
+
+def _normalize_email_for_dedup(raw: str) -> str:
+  """规范化邮箱用于去重：strip、小写、Unicode 标准化、移除不可见字符。
+  避免同一邮箱因全角/零宽字符等差异被视为不同，导致重复发送。"""
+  s = (raw or "").strip()
+  if not s:
+    return ""
+  s = unicodedata.normalize("NFKC", s)  # 全角→半角、组合字符等
+  s = "".join(c for c in s if unicodedata.category(c) != "Cf")  # 移除格式控制字符（零宽等）
+  s = s.lower()
+  return s
+SIGNATURE_HTML = "<div style='margin:16px 0 0;font-size:14px;line-height:1.6;color:#111;'>此致<br/>湃乐多航运科技</div>"
+
+def _ensure_email_templates_columns(db: Session) -> None:
+  """轻量迁移：保证 email_templates 必要列存在（兼容旧 sqlite db）。"""
+  try:
+    info = db.execute(sa.text("PRAGMA table_info(email_templates)")).fetchall()
+    cols = {row[1] for row in info}
+    if "image_ids" not in cols:
+      db.execute(sa.text("ALTER TABLE email_templates ADD COLUMN image_ids VARCHAR(1000) NULL"))
+      db.commit()
+    if "status" not in cols:
+      db.execute(sa.text("ALTER TABLE email_templates ADD COLUMN status VARCHAR(20) NOT NULL DEFAULT 'pending'"))
+      db.commit()
+      if "enabled" in cols:
+        db.execute(sa.text("UPDATE email_templates SET status='enabled' WHERE enabled=1 OR enabled IS NULL"))
+        db.execute(sa.text("UPDATE email_templates SET status='disabled' WHERE enabled=0"))
+        db.commit()
+  except Exception:
+    pass
+
 
 def _get_cc_email_for_sales(db: Session, user: User) -> str | None:
-  """获取销售发件时的 CC 邮箱：优先使用管理员配置的 plt 邮箱，否则用注册时的 cc_email。"""
-  m = db.query(SalesPltEmail).filter(SalesPltEmail.sales_id == user.id).first()
-  if m and m.plt_email:
-    return (m.plt_email or "").strip() or None
+  """获取销售发件时的 CC 邮箱：使用管理员配置的 cc_email。"""
   return (user.cc_email or "").strip() or None
 
 
@@ -65,9 +103,7 @@ class SendTestRequest(BaseModel):
 
 
 class BatchSendRequest(BaseModel):
-  template_id: int | None = None
-  image_ids: list[int] | None = None
-  subject: str | None = None  # 邮件主题，为空则用模版名
+  template_id: int
 
 
 class ScheduleCreateRequest(BaseModel):
@@ -76,9 +112,7 @@ class ScheduleCreateRequest(BaseModel):
   day_of_month: int | None = None  # 1-31，按月时必填
   time: str  # "HH:MM"
   repeat_count: int = 1
-  template_id: int | None = None
-  image_ids: list[int] | None = None  # 图片物料 id 列表，与预览所选一致
-  subject: str | None = None  # 邮件主题，为空则用模版名
+  template_id: int  # 选择一套邮件方案（标题+文字模版+图片）
 
 
 class ScheduleCancelRequest(BaseModel):
@@ -91,6 +125,8 @@ _global_pending_emails: int = 0
 RATE_LIMIT_SECONDS = 30
 # 严格全局串行：所有批次/计划发送共享同一把锁，避免多人同时触发时并发发送带来的风控风险
 _global_send_lock = threading.Lock()
+# 限速锁：确保 _send_smtp_email 的 30 秒间隔在多线程/多请求下严格执行
+_rate_limit_lock = threading.Lock()
 
 
 @router.get("/queue/status")
@@ -163,21 +199,90 @@ def _build_attachments_from_image_ids(
   return attachments
 
 
+def _build_inline_images_from_image_ids(
+  db: Session,
+  image_ids: list[int] | None,
+) -> list[dict]:
+  """
+  根据图片 id 列表构造 inline 图片：
+  [{"cid": "xxx", "maintype": "image", "subtype": "jpeg", "data": b"...", "filename": "a.jpg"}]
+  """
+  if not image_ids:
+    return []
+  rows = db.query(EmailImage).filter(EmailImage.id.in_(image_ids)).all()
+  if not rows:
+    return []
+  backend_root = Path(__file__).resolve().parent.parent.parent  # backend/
+  upload_root = backend_root / settings.upload_dir
+  out: list[dict] = []
+  for idx, img in enumerate(rows, start=1):
+    try:
+      full_path = upload_root / img.file_path
+      data = full_path.read_bytes()
+    except OSError:
+      continue
+    ctype, _ = mimetypes.guess_type(str(full_path))
+    mimetype = ctype or "application/octet-stream"
+    if "/" in mimetype:
+      maintype, subtype = mimetype.split("/", 1)
+    else:
+      maintype, subtype = "application", "octet-stream"
+    raw_name = (img.name or "").strip()
+    filename = full_path.name
+    if raw_name:
+      filename = raw_name if Path(raw_name).suffix else f"{raw_name}{full_path.suffix}"
+      if not Path(filename).suffix:
+        filename = full_path.name
+    cid = make_msgid()[1:-1]  # 去掉尖括号，HTML 中用 cid:xxx
+    out.append({"cid": cid, "maintype": maintype, "subtype": subtype, "data": data, "filename": filename})
+  return out
+
+
+def _text_to_html(text: str) -> str:
+  safe = html.escape(text or "").replace("\n", "<br/>")
+  return f"<div style='font-size:14px;line-height:1.6;color:#111;'>{safe}</div>"
+
+
+def _build_email_html(content_text: str, inline_images: list[dict]) -> str:
+  imgs = ""
+  for img in inline_images or []:
+    cid = html.escape(img.get("cid") or "")
+    if not cid:
+      continue
+    imgs += (
+      "<div style='margin:12px 0 0;'>"
+      f"<img src=\"cid:{cid}\" style='display:block;border:0;max-width:100%;height:auto;' width='600'/>"
+      "</div>"
+    )
+  # 排版顺序：文字 -> 图片 -> 落款
+  body = _text_to_html(content_text) + imgs + SIGNATURE_HTML
+  return (
+    "<!doctype html><html><body>"
+    "<table role='presentation' width='100%' cellpadding='0' cellspacing='0' style='font-family:Arial,Helvetica,sans-serif;'>"
+    "<tr><td>"
+    f"{body}"
+    "</td></tr></table>"
+    "</body></html>"
+  )
+
+
 def _send_smtp_email(
   to_email: str,
   subject: str,
   content: str,
   cc_email: str | None = None,
-  attachments: list[tuple[str, str, bytes]] | None = None,
+  inline_images: list[dict] | None = None,
 ) -> None:
   global _last_send_global
 
-  # 全局限速：任意销售的任意邮件，30 秒 1 封
-  now = datetime.now(timezone.utc)
-  if _last_send_global is not None:
-    delta = (now - _last_send_global).total_seconds()
-    if 0 <= delta < RATE_LIMIT_SECONDS:
-      time.sleep(RATE_LIMIT_SECONDS - delta)
+  # 全局限速：任意销售的任意邮件，30 秒 1 封（加锁避免并发绕过）
+  with _rate_limit_lock:
+    now = datetime.now(timezone.utc)
+    if _last_send_global is not None:
+      delta = (now - _last_send_global).total_seconds()
+      if 0 <= delta < RATE_LIMIT_SECONDS:
+        time.sleep(RATE_LIMIT_SECONDS - delta)
+    _last_send_global = datetime.now(timezone.utc)
 
   msg = EmailMessage()
   msg["Subject"] = subject or "邮件预览测试"
@@ -188,12 +293,28 @@ def _send_smtp_email(
   msg["Message-ID"] = make_msgid()
   if cc_email:
     msg["Cc"] = cc_email
-  msg.set_content(content or "", subtype="plain", charset="utf-8")
-
-  if attachments:
-    for filename, mimetype, data in attachments:
-      maintype, subtype = (mimetype or "application/octet-stream").split("/", 1)
-      msg.add_attachment(data, maintype=maintype, subtype=subtype, filename=filename)
+  # 纯文本兜底 + HTML 正文（含 CID 内嵌图片）
+  plain = (content or "").rstrip()
+  if plain:
+    plain = f"{plain}\n\n{SIGNATURE_TEXT}"
+  else:
+    plain = SIGNATURE_TEXT
+  msg.set_content(plain, subtype="plain", charset="utf-8")
+  html_body = _build_email_html(content or "", inline_images or [])
+  msg.add_alternative(html_body, subtype="html", charset="utf-8")
+  if inline_images:
+    html_part = msg.get_payload()[-1]  # text/html part
+    for img in inline_images:
+      cid = img.get("cid")
+      if not cid:
+        continue
+      html_part.add_related(
+        img.get("data") or b"",
+        maintype=img.get("maintype") or "application",
+        subtype=img.get("subtype") or "octet-stream",
+        cid=f"<{cid}>",
+        filename=img.get("filename") or None,
+      )
 
   recipients = [to_email]
   if cc_email and cc_email not in recipients:
@@ -210,7 +331,6 @@ def _send_smtp_email(
         server.starttls()
         server.login(settings.smtp_user, settings.smtp_password)
         server.send_message(msg, from_addr=msg["From"], to_addrs=recipients)
-    _last_send_global = datetime.now(timezone.utc)
   except Exception as exc:  # pragma: no cover - 网络错误在运行时体现
     raise HTTPException(
       status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
@@ -248,7 +368,7 @@ def send_test_email(
 
   _ensure_smtp_config()
   cc_email = _get_cc_email_for_sales(db, current_user)
-  attachments = _build_attachments_from_image_ids(db, payload.image_ids or [])
+  inline_images = _build_inline_images_from_image_ids(db, payload.image_ids or [])
   subject = payload.subject or "邮件预览测试"
   content = payload.content or ""
   sent_list: list[str] = []
@@ -256,12 +376,12 @@ def send_test_email(
 
   for to_email in emails:
     try:
-      _send_smtp_email(to_email, subject, content, cc_email=cc_email, attachments=attachments)
+      _send_smtp_email(to_email, subject, content, cc_email=cc_email, inline_images=inline_images)
       log_email_sent(
         current_user.name, current_user.login,
         to_email, cc_email, settings.smtp_sender or settings.smtp_user,
-        subject, content,
-        [a[0] for a in attachments],
+        content,
+        [i.get("filename") for i in inline_images if i.get("filename")],
       )
       rec = EmailRecord(
         sales_id=current_user.id,
@@ -299,9 +419,9 @@ def send_test_email(
 
 def _run_batch_send(
   sales_id: int,
-  template_id: int | None,
+  template_id: int,
   image_ids: list[int] | None = None,
-  schedule_id: int | None = None,
+  schedule_ids: int | list[int] | None = None,
   custom_subject: str | None = None,
 ) -> None:
   """后台任务：对当前销售的全部客户依次发送邮件，每封间隔 30 秒（全局限速共享），可携带图片附件。
@@ -310,27 +430,41 @@ def _run_batch_send(
   db = SessionLocal()
   schedule_updated = False
   try:
+    _ensure_email_templates_columns(db)
     # 严格全局串行：同一时间仅允许一个发送线程进入发送循环
     _global_send_lock.acquire()
     user = db.query(User).filter(User.id == sales_id).first()
     if not user:
-      if schedule_id is not None:
-        _mark_schedule_failed(schedule_id)
+      if schedule_ids is not None:
+        _mark_schedule_failed(schedule_ids)
+        log_schedule_failed(schedule_ids, "用户不存在")
       return
 
     # 读取模版内容与名称（用于主题）
-    template_content = ""
-    subject_prefix = (custom_subject or "").strip() or "营销邮件"
-    if template_id:
-      tpl = db.query(EmailTemplate).filter(EmailTemplate.id == template_id).first()
-      if tpl:
-        template_content = tpl.content or ""
-        # 未传入自定义 subject 时，才回退使用模版名
-        if subject_prefix == "营销邮件" and (tpl.name or "").strip():
-          subject_prefix = tpl.name.strip()
+    tpl = db.query(EmailTemplate).filter(EmailTemplate.id == template_id).first()
+    if not tpl:
+      if schedule_ids is not None:
+        _mark_schedule_failed(schedule_ids)
+        log_schedule_failed(schedule_ids, "模版不存在")
+      return
+    template_content = tpl.content or ""
+    subject_prefix = (tpl.name or "").strip() or "营销邮件"
 
-    _ensure_smtp_config()
-    attachments = _build_attachments_from_image_ids(db, image_ids or [])
+    try:
+      _ensure_smtp_config()
+    except Exception as e:
+      if schedule_ids is not None:
+        _mark_schedule_failed(schedule_ids)
+        log_schedule_failed(schedule_ids, str(e))
+      return
+    # 若显式传入 image_ids（兼容旧计划），优先使用；否则取模版自带图片
+    effective_image_ids = image_ids
+    if not effective_image_ids:
+      try:
+        effective_image_ids = json.loads(getattr(tpl, "image_ids", None) or "[]")
+      except Exception:
+        effective_image_ids = []
+    inline_images = _build_inline_images_from_image_ids(db, effective_image_ids or [])
 
     customers = (
       db.query(CustomerList)
@@ -338,11 +472,32 @@ def _run_batch_send(
       .order_by(CustomerList.id)
       .all()
     )
+    # 按邮箱去重，同一邮箱只发一封（取第一条客户记录用于内容生成）
+    # 使用 _normalize_email_for_dedup 防止全角/零宽字符等导致同一邮箱被视为不同
+    seen_emails: set[str] = set()
+    unique_customers: list[CustomerList] = []
+    for cust in customers:
+      raw = (cust.email or "").strip()
+      if not raw:
+        continue
+      key = _normalize_email_for_dedup(raw)
+      if not key or key in seen_emails:
+        continue
+      seen_emails.add(key)
+      unique_customers.append(cust)
+
     cc_email = _get_cc_email_for_sales(db, user)
     from_email = settings.smtp_sender or settings.smtp_user
 
-    for cust in customers:
-      to_email = (cust.email or "").strip()
+    queued_count = db.query(EmailRecord).filter(
+      EmailRecord.sales_id == sales_id,
+      EmailRecord.status == "queued",
+    ).count()
+    log_batch_send_start(user.login or "", len(unique_customers), queued_count)
+
+    for cust in unique_customers:
+      raw = (cust.email or "").strip()
+      to_email = _normalize_email_for_dedup(raw) if raw else ""
       if not to_email:
         continue
 
@@ -366,16 +521,16 @@ def _run_batch_send(
         .first()
       )
       if rec is None:
-        # 若未预先创建队列记录，则跳过该行（理论上不应发生）
+        log_batch_skip_no_record(to_email, user.login or "")
         continue
 
       try:
-        _send_smtp_email(to_email, subject, content, cc_email=cc_email, attachments=attachments)
+        _send_smtp_email(to_email, subject, content, cc_email=cc_email, inline_images=inline_images)
         log_email_sent(
           user.name, user.login,
           to_email, cc_email, from_email,
-          subject, content or "",
-          [a[0] for a in attachments],
+          content or "",
+          [i.get("filename") for i in inline_images if i.get("filename")],
         )
         rec.status = "sent"
         rec.subject = subject
@@ -397,13 +552,13 @@ def _run_batch_send(
       _global_pending_emails = max(0, _global_pending_emails - 1)
 
     # 仅当完整跑完发送循环后才更新计划状态（未抛异常、未提前 return）
-    if schedule_id is not None:
-      _update_schedule_after_batch_done(schedule_id)
+    if schedule_ids is not None:
+      _update_schedule_after_batch_done(schedule_ids)
       schedule_updated = True
-  except Exception:
-    # 例如 _ensure_smtp_config() 失败或其它异常：不更新计划，保持 sending，便于排查
-    if schedule_id is not None and not schedule_updated:
-      _mark_schedule_failed(schedule_id)
+  except Exception as e:
+    if schedule_ids is not None and not schedule_updated:
+      _mark_schedule_failed(schedule_ids)
+      log_schedule_failed(schedule_ids, str(e))
   finally:
     try:
       if _global_send_lock.locked():
@@ -413,42 +568,46 @@ def _run_batch_send(
     db.close()
 
 
-def _update_schedule_after_batch_done(schedule_id: int) -> None:
-  """批量发送线程结束后调用：将计划的 current_count +1，status 置为 completed 或 active（仅当当前为 sending 时更新）。"""
+def _update_schedule_after_batch_done(schedule_ids: int | list[int]) -> None:
+  """批量发送线程结束后调用：将计划的 current_count +1，status 置为 completed 或 active。支持多个计划（同一销售+模版合并执行时）。"""
+  ids = [schedule_ids] if isinstance(schedule_ids, int) else schedule_ids
   db = SessionLocal()
   try:
-    row = db.query(SendSchedule).filter(SendSchedule.id == schedule_id).first()
-    if not row or row.status != "sending":
-      return
-    new_count = (row.current_count or 0) + 1
-    new_status = "completed" if new_count >= (row.repeat_count or 1) else "active"
-    db.query(SendSchedule).filter(SendSchedule.id == schedule_id).update(
-      {"current_count": new_count, "status": new_status},
-      synchronize_session=False,
-    )
+    for sid in ids:
+      row = db.query(SendSchedule).filter(SendSchedule.id == sid).first()
+      if not row or row.status != "sending":
+        continue
+      new_count = (row.current_count or 0) + 1
+      new_status = "completed" if new_count >= (row.repeat_count or 1) else "active"
+      db.query(SendSchedule).filter(SendSchedule.id == sid).update(
+        {"current_count": new_count, "status": new_status},
+        synchronize_session=False,
+      )
     db.commit()
   finally:
     db.close()
 
 
-def _mark_schedule_failed(schedule_id: int) -> None:
+def _mark_schedule_failed(schedule_ids: int | list[int]) -> None:
   """发送过程发生异常时调用：将计划置为 failed，便于用户区分“未发就结束”的情况。"""
+  ids = [schedule_ids] if isinstance(schedule_ids, int) else schedule_ids
   db = SessionLocal()
   try:
-    row = db.query(SendSchedule).filter(SendSchedule.id == schedule_id).first()
-    if not row or row.status != "sending":
-      return
-    db.query(SendSchedule).filter(SendSchedule.id == schedule_id).update(
-      {"status": "failed"},
-      synchronize_session=False,
-    )
+    for sid in ids:
+      row = db.query(SendSchedule).filter(SendSchedule.id == sid).first()
+      if not row or row.status != "sending":
+        continue
+      db.query(SendSchedule).filter(SendSchedule.id == sid).update(
+        {"status": "failed"},
+        synchronize_session=False,
+      )
     db.commit()
   finally:
     db.close()
 
 
 def _create_queued_records_for_sales(db: Session, sales_id: int, image_ids: list[int] | None = None) -> int:
-  """为该销售的所有客户创建 status=queued 的 EmailRecord，返回创建条数。供即刻群发与定期计划共用。"""
+  """为该销售的所有客户创建 status=queued 的 EmailRecord，返回创建条数。同一邮箱只创建一条，避免重复发送。"""
   user = db.query(User).filter(User.id == sales_id).first()
   if not user:
     return 0
@@ -460,14 +619,19 @@ def _create_queued_records_for_sales(db: Session, sales_id: int, image_ids: list
   )
   from_email = settings.smtp_sender or settings.smtp_user
   cc_email = _get_cc_email_for_sales(db, user)
+  seen_emails: set[str] = set()
   n = 0
   for cust in customers:
-    to_email = (cust.email or "").strip()
-    if not to_email:
+    raw = (cust.email or "").strip()
+    if not raw:
       continue
+    key = _normalize_email_for_dedup(raw)
+    if not key or key in seen_emails:
+      continue
+    seen_emails.add(key)
     rec = EmailRecord(
       sales_id=sales_id,
-      to_email=to_email,
+      to_email=key,
       from_email=from_email,
       cc_email=cc_email,
       subject="",
@@ -491,18 +655,29 @@ def start_batch_send(
   """开始批量发送：对当前销售的客户表按顺序依次发送，每 30 秒 1 封（全销售共享限速队列）。"""
   global _global_pending_emails
 
-  n = _create_queued_records_for_sales(db, current_user.id, payload.image_ids or [])
+  _ensure_email_templates_columns(db)
+  tpl = db.query(EmailTemplate).filter(EmailTemplate.id == payload.template_id).first()
+  if not tpl:
+    raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="模版不存在")
+  if getattr(tpl, "status", None) != STATUS_ENABLED:
+    raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="该模版未发布或已禁用，销售端无法使用")
+  tpl_image_ids = []
+  try:
+    tpl_image_ids = json.loads(getattr(tpl, "image_ids", None) or "[]") or []
+  except Exception:
+    tpl_image_ids = []
+  n = _create_queued_records_for_sales(db, current_user.id, tpl_image_ids)
   _global_pending_emails += n
-  tpl_name, img_names = _resolve_template_and_image_names(db, payload.template_id, payload.image_ids or [])
-  log_batch_send_created(current_user.name, current_user.login, tpl_name, img_names, (payload.subject or "").strip() or None)
+  tpl_name, img_names = _resolve_template_and_image_names(db, payload.template_id, tpl_image_ids)
+  log_batch_send_created(current_user.name, current_user.login, tpl_name, img_names)
 
   background_tasks.add_task(
     _run_batch_send,
     current_user.id,
     payload.template_id,
-    payload.image_ids or [],
+    tpl_image_ids,
     None,
-    (payload.subject or "").strip() or None,
+    None,
   )
   return {
     "status": "accepted",
@@ -556,21 +731,27 @@ def create_schedule(
     day_of_month_val = payload.day_of_month
     day_of_week_val = 0  # 按月不用，存 0 以满足非空约束（若表未改可空）
 
-  if payload.template_id is not None:
-    tpl = db.query(EmailTemplate).filter(EmailTemplate.id == payload.template_id).first()
-    if not tpl:
-      raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="模版不存在")
+  _ensure_email_templates_columns(db)
+  tpl = db.query(EmailTemplate).filter(EmailTemplate.id == payload.template_id).first()
+  if not tpl:
+    raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="模版不存在")
+  if getattr(tpl, "status", None) != STATUS_ENABLED:
+    raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="该模版未发布或已禁用，无法创建计划")
 
-  image_ids_json: str | None = None
-  if payload.image_ids:
-    try:
-      ids = [int(x) for x in payload.image_ids]
-    except (TypeError, ValueError):
-      raise HTTPException(
-        status_code=status.HTTP_400_BAD_REQUEST,
-        detail="image_ids 需为数字 id 列表",
-      )
-    image_ids_json = json.dumps(ids)
+  # 防重复：同一销售+模版+周期+时间 已存在 active 计划则拒绝
+  q = db.query(SendSchedule).filter(
+    SendSchedule.sales_id == current_user.id,
+    SendSchedule.template_id == payload.template_id,
+    SendSchedule.recurrence_type == recurrence,
+    SendSchedule.time == time_str,
+    SendSchedule.status == "active",
+  )
+  if recurrence == "week":
+    q = q.filter(SendSchedule.day_of_week == day_of_week_val)
+  else:
+    q = q.filter(SendSchedule.day_of_month == day_of_month_val)
+  if q.first():
+    raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="该模版在此时间已存在进行中的计划，请勿重复创建")
 
   row = SendSchedule(
     sales_id=current_user.id,
@@ -582,18 +763,22 @@ def create_schedule(
     current_count=0,
     status="active",
     template_id=payload.template_id,
-    image_ids=image_ids_json,
-    subject=(payload.subject or "").strip() or None,
+    image_ids=None,
+    subject=None,
   )
   db.add(row)
   db.commit()
   db.refresh(row)
-  tpl_name, img_names = _resolve_template_and_image_names(db, payload.template_id, payload.image_ids or [])
+  tpl_image_ids = []
+  try:
+    tpl_image_ids = json.loads(getattr(tpl, "image_ids", None) or "[]") or []
+  except Exception:
+    tpl_image_ids = []
+  tpl_name, img_names = _resolve_template_and_image_names(db, payload.template_id, tpl_image_ids)
   log_schedule_created(
     current_user.name, current_user.login,
     recurrence, day_of_week_val, day_of_month_val, time_str,
     tpl_name, img_names,
-    (payload.subject or "").strip() or None,
   )
   return {
     "id": row.id,
@@ -605,8 +790,8 @@ def create_schedule(
     "current_count": 0,
     "status": row.status,
     "template_id": row.template_id,
-    "image_ids": payload.image_ids,
-    "subject": (payload.subject or "").strip() or None,
+    "image_ids": None,
+    "subject": None,
     "created_at": row.created_at.isoformat() if row.created_at else None,
   }
 
@@ -617,12 +802,15 @@ def list_schedules(
   db: Session = Depends(get_db),
   status_filter: str | None = None,
 ):
-  """计划列表：销售仅本人，管理员全部。可选 status_filter: active | completed | cancelled。"""
+  """计划列表：销售仅本人，管理员全部。可选 status_filter: active | completed | cancelled（含 template_disabled）。"""
   q = db.query(SendSchedule, User.name).join(User, SendSchedule.sales_id == User.id, isouter=True)
   if current_user.role != "admin":
     q = q.filter(SendSchedule.sales_id == current_user.id)
   if status_filter:
-    q = q.filter(SendSchedule.status == status_filter)
+    if status_filter == "cancelled":
+      q = q.filter(SendSchedule.status.in_(["cancelled", "template_disabled"]))
+    else:
+      q = q.filter(SendSchedule.status == status_filter)
   rows = q.order_by(SendSchedule.created_at.desc()).all()
   items = []
   for rec, sales_name in rows:
@@ -632,6 +820,11 @@ def list_schedules(
         image_ids = json.loads(rec.image_ids)
       except Exception:
         pass
+    template_name = None
+    if rec.template_id:
+      tpl = db.query(EmailTemplate).filter(EmailTemplate.id == rec.template_id).first()
+      if tpl:
+        template_name = tpl.name
     items.append({
       "id": rec.id,
       "sales_id": rec.sales_id,
@@ -644,6 +837,7 @@ def list_schedules(
       "current_count": rec.current_count,
       "status": rec.status,
       "template_id": rec.template_id,
+      "template_name": template_name,
       "image_ids": image_ids,
       "subject": getattr(rec, "subject", None),
       "created_at": rec.created_at.isoformat() if rec.created_at else None,
@@ -677,7 +871,7 @@ def cancel_schedule(
   row.status = "cancelled"
   db.add(row)
   db.commit()
-  log_schedule_cancelled(current_user.name, current_user.login, owner_name, schedule_desc, (getattr(row, "subject", None) or "").strip() or None)
+  log_schedule_cancelled(current_user.name, current_user.login, owner_name, schedule_desc)
   return {"ok": True, "detail": "已取消计划"}
 
 
@@ -691,7 +885,16 @@ def check_and_run_schedules() -> None:
   global _global_pending_emails
   db = SessionLocal()
   try:
+    # 多进程互斥：仅有一个进程能执行本分钟的调度（uvicorn --workers N 时避免重复发送）
     now = datetime.now(BEIJING_TZ)
+    minute_key = now.strftime("%Y-%m-%dT%H:%M")
+    try:
+      db.execute(sa.text("INSERT INTO cron_run_locks (minute_key) VALUES (:k)"), {"k": minute_key})
+      db.commit()
+    except Exception:
+      db.rollback()
+      return  # 其他进程已执行本分钟
+    _ensure_email_templates_columns(db)
     weekday = now.weekday()  # 0=周一 .. 6=周日
     day_of_month = now.day  # 1-31
     time_str = now.strftime("%H:%M")
@@ -718,36 +921,66 @@ def check_and_run_schedules() -> None:
         effective = min(dom, last_day.day)
         if day_of_month == effective:
           rows.append(row)
+    # 按 (sales_id, template_id) 合并：同一销售+模版在同一时刻只执行一次，避免重复发多封
+    key_to_rows: dict[tuple[int, int | None], list] = {}
     for row in rows:
       db.refresh(row)
       if row.status != "active" or row.current_count >= row.repeat_count:
         continue
-      schedule_id, sales_id = row.id, row.sales_id
-      template_id, repeat_count, current_count = row.template_id, row.repeat_count, row.current_count
+      if not row.template_id:
+        continue
+      tpl = db.query(EmailTemplate).filter(EmailTemplate.id == row.template_id).first()
+      if tpl and getattr(tpl, "status", None) != STATUS_ENABLED:
+        db.query(SendSchedule).filter(SendSchedule.id == row.id).update(
+          {"status": "template_disabled"},
+          synchronize_session=False,
+        )
+        db.commit()
+        continue
+      key = (row.sales_id, row.template_id)
+      key_to_rows.setdefault(key, []).append(row)
+
+    total_matched = sum(len(g) for g in key_to_rows.values())
+    total_queued = 0
+    for (sales_id, tid), group in key_to_rows.items():
+      if not group:
+        continue
+      row0 = group[0]
+      template_id = row0.template_id
+      schedule_ids = [r.id for r in group]
       image_ids = None
-      if row.image_ids:
+      if row0.image_ids:
         try:
-          image_ids = json.loads(row.image_ids)
+          image_ids = json.loads(row0.image_ids)
         except Exception:
           image_ids = None
+      if not image_ids and template_id:
+        tpl = db.query(EmailTemplate).filter(EmailTemplate.id == template_id).first()
+        if tpl:
+          try:
+            image_ids = json.loads(getattr(tpl, "image_ids", None) or "[]") or []
+          except Exception:
+            image_ids = []
       n = _create_queued_records_for_sales(db, sales_id, image_ids or [])
+      total_queued += n
       _global_pending_emails += n
-      # 先置为 sending，避免下一分钟定时任务再次命中同一计划
-      db.query(SendSchedule).filter(SendSchedule.id == schedule_id).update(
-        {"status": "sending"},
-        synchronize_session=False,
-      )
+      for r in group:
+        db.query(SendSchedule).filter(SendSchedule.id == r.id).update(
+          {"status": "sending"},
+          synchronize_session=False,
+        )
       db.commit()
-      # 计划状态改为在 _run_batch_send 全部发完后由 _update_schedule_after_batch_done 更新为 completed/active
       threading.Thread(
         target=_run_batch_send,
         args=(sales_id, template_id, image_ids or []),
         kwargs={
-          "schedule_id": schedule_id,
-          "custom_subject": (getattr(row, "subject", None) or "").strip() or None,
+          "schedule_ids": schedule_ids,
+          "custom_subject": None,
         },
         daemon=True,
       ).start()
+    if key_to_rows:
+      log_schedule_run(minute_key, total_matched, len(key_to_rows), total_queued)
   finally:
     db.close()
 

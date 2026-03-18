@@ -49,13 +49,11 @@ def log_batch_send_created(
     sales_login: str,
     template_name: str | None,
     image_names: list[str],
-    subject: str | None = None,
 ) -> None:
     """谁创建了群发任务（模版名、图片名为可读信息）"""
     tpl = f"模版={template_name}" if template_name else "无模版"
     imgs = f"图片=[{','.join(image_names)}]" if image_names else "无图片"
-    subj = f"主题={subject}" if (subject or "").strip() else "无主题"
-    write(f"[群发任务] {sales_name}（{sales_login}）创建群发任务，{subj}，{tpl}，{imgs}")
+    write(f"[群发任务] {sales_name}（{sales_login}）创建群发任务，{tpl}，{imgs}")
 
 
 def log_schedule_created(
@@ -67,7 +65,6 @@ def log_schedule_created(
     time_str: str,
     template_name: str | None,
     image_names: list[str],
-    subject: str | None = None,
 ) -> None:
     """谁创建了循环任务、任务是什么（模版名、图片名为可读信息）"""
     if recurrence_type == "week":
@@ -77,8 +74,7 @@ def log_schedule_created(
         day_desc = f"每月{day_of_month}日" if day_of_month else "?"
     tpl = f"模版={template_name}" if template_name else "无模版"
     imgs = f"图片=[{','.join(image_names)}]" if image_names else "无图片"
-    subj = f"主题={subject}" if (subject or "").strip() else "无主题"
-    write(f"[循环任务] {sales_name}（{sales_login}）创建循环任务：{day_desc} {time_str}，{subj}，{tpl}，{imgs}")
+    write(f"[循环任务] {sales_name}（{sales_login}）创建循环任务：{day_desc} {time_str}，{tpl}，{imgs}")
 
 
 def log_email_sent(
@@ -87,7 +83,6 @@ def log_email_sent(
     to_email: str,
     cc_email: str | None,
     from_email: str,
-    subject: str,
     content_preview: str,
     image_attachments: list[str],
 ) -> None:
@@ -97,7 +92,7 @@ def log_email_sent(
     imgs = f"图片附件=[{','.join(image_attachments)}]" if image_attachments else "无图片附件"
     write(
         f"[发邮件] {sales_name}（{sales_login}）发邮件：To={to_email} CC={cc} From={from_email} "
-        f"主题={subject} 内容={content} {imgs}"
+        f"内容={content} {imgs}"
     )
 
 
@@ -111,16 +106,19 @@ def log_email_failed(
     write(f"[发送失败] {sales_name}（{sales_login}）发往 To={to_email} 失败：{error_detail}")
 
 
+def log_schedule_run(minute_key: str, matched_count: int, group_count: int, queued_total: int) -> None:
+    """定时任务执行：匹配到的计划数、合并后的批次数、创建的排队总数"""
+    write(f"[定时调度] {minute_key} 匹配 {matched_count} 条计划，合并为 {group_count} 批，共创建 {queued_total} 封排队邮件")
+
+
 def log_schedule_cancelled(
     operator_name: str,
     operator_login: str,
     schedule_owner_name: str,
     schedule_desc: str,
-    subject: str | None = None,
 ) -> None:
     """循环任务取消：谁取消了谁的计划"""
-    subj = f"主题={subject}" if (subject or "").strip() else "无主题"
-    write(f"[循环任务取消] {operator_name}（{operator_login}）取消了 {schedule_owner_name} 的计划：{schedule_desc}，{subj}")
+    write(f"[循环任务取消] {operator_name}（{operator_login}）取消了 {schedule_owner_name} 的计划：{schedule_desc}")
 
 
 def log_queued_cancelled(
@@ -130,3 +128,35 @@ def log_queued_cancelled(
 ) -> None:
     """排队中任务取消：谁取消了发给谁的排队邮件"""
     write(f"[排队取消] {operator_name}（{operator_login}）取消了发往 To={to_email} 的排队邮件")
+
+
+def log_schedule_failed(
+    schedule_ids: int | list[int],
+    reason: str,
+) -> None:
+    """计划发送失败：SMTP 配置缺失、模版不存在等异常"""
+    write(f"[计划发送失败] 计划ID={schedule_ids}，原因：{reason}")
+
+
+def log_batch_send_start(
+    sales_login: str,
+    unique_count: int,
+    queued_count: int,
+) -> None:
+    """批量发送线程启动：用于排查“创建了排队但未发”问题"""
+    write(f"[批量发送] {sales_login} 开始发送，unique_customers={unique_count}，待发送记录数应={queued_count}")
+
+
+def log_batch_skip_no_record(to_email: str, sales_login: str) -> None:
+    """跳过发送：未找到对应排队记录（异常情况）"""
+    write(f"[批量发送] 跳过 To={to_email}：未找到排队记录（销售={sales_login}）")
+
+
+def log_template_published(operator_name: str, operator_login: str, template_name: str, template_id: int) -> None:
+    """管理员发布模版"""
+    write(f"[模版发布] {operator_name}（{operator_login}）发布了模版：{template_name}（ID={template_id}）")
+
+
+def log_template_disabled(operator_name: str, operator_login: str, template_name: str, template_id: int) -> None:
+    """管理员禁用模版"""
+    write(f"[模版禁用] {operator_name}（{operator_login}）禁用了模版：{template_name}（ID={template_id}）")

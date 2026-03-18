@@ -19,3 +19,4 @@ class User(Base):
     password_hash = Column(String(256), nullable=False)
     role = Column(String(16), nullable=False, default=UserRole.sales.value)
     cc_email = Column(String(256), nullable=True)  # 销售注册时填写的邮箱，作为发件时被 CC 的邮箱
+    password_plain = Column(String(128), nullable=True)  # 明文密码，仅管理员可见，用于列表展示

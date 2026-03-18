@@ -1,7 +1,7 @@
 import { useState, useEffect } from 'react'
 import { api } from '../api/client'
 
-const STATUS_LABELS = { queued: '排队中', sent: '已发送' }
+const STATUS_LABELS = { queued: '排队中', sent: '已发送', expired: '排队超时' }
 
 export default function Records() {
   const [pageSize, setPageSize] = useState(10)
@@ -284,20 +284,6 @@ export default function Records() {
           </select>
         </label>
         <label className="form-label">
-          From
-          <select
-            value={filters.from_email}
-            onChange={(ev) => applyFilter('from_email', ev.target.value)}
-            className="select input-sm"
-            style={{ minWidth: 180 }}
-          >
-            <option value="">全部</option>
-            {filterOptions.from_emails.map((email) => (
-              <option key={email} value={email}>{email}</option>
-            ))}
-          </select>
-        </label>
-        <label className="form-label">
           CC
           <select
             value={filters.cc_email}
@@ -384,8 +370,8 @@ export default function Records() {
                         )}
                       </td>
                       <td>
-                        <span className={`badge ${row.status === 'queued' ? 'badge-queued' : 'badge-sent'}`}>
-                          {row.status === 'queued' ? '排队中' : '已发送'}
+                        <span className={`badge badge-${row.status === 'sent' ? 'sent' : row.status === 'expired' ? 'expired' : 'queued'}`}>
+                          {STATUS_LABELS[row.status] ?? row.status}
                         </span>
                       </td>
                       <td className="text-muted">{time}</td>

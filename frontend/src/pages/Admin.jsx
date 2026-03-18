@@ -6,43 +6,26 @@ export default function Admin() {
     <div>
       <h1 className="page-title">管理员</h1>
       <p className="page-desc">
-        维护销售邮箱、图片物料、话术模版等。
+        维护销售邮箱、邮件模版等。
       </p>
-      <AdminSalesEmails />
+      <AdminSalesUsers />
       <AdminTemplates />
-      <AdminImages />
     </div>
   )
 }
 
-function AdminSalesEmails() {
+function AdminSalesUsers() {
   const [rows, setRows] = useState([])
   const [loading, setLoading] = useState(true)
   const [message, setMessage] = useState('')
+  const [editing, setEditing] = useState(null)
+  const [form, setForm] = useState({ email: '', password: '' })
 
   const fetchData = () => {
     setLoading(true)
     setMessage('')
-    Promise.all([
-      api.get('/admin/sales-email/users').then((r) => r.data || []),
-      api.get('/admin/sales-email').then((r) => r.data || []),
-    ])
-      .then(([users, mappings]) => {
-        const list = users
-          .filter((u) => u.role === 'sales')
-          .map((u) => {
-            const m = mappings.find((x) => x.sales_id === u.id)
-            return {
-              id: u.id,
-              name: u.name,
-              login: u.login,
-              role: u.role,
-              pltEmail: m?.plt_email || u.cc_email || '',
-              mappingId: m?.id || null,
-            }
-          })
-        setRows(list)
-      })
+    api.get('/admin/sales')
+      .then((r) => setRows(r.data || []))
       .catch(() => {
         setRows([])
         setMessage('加载失败')
@@ -54,188 +37,129 @@ function AdminSalesEmails() {
     fetchData()
   }, [])
 
-  const handleChangeEmail = (id, value) => {
-    setRows((prev) =>
-      prev.map((r) => (r.id === id ? { ...r, pltEmail: value } : r)),
-    )
+  const resetForm = () => {
+    setEditing(null)
+    setForm({ email: '', password: '' })
   }
 
-  const handleSave = (row) => {
-    const email = row.pltEmail.trim()
+  const handleEdit = (row) => {
+    setEditing(row)
+    setForm({
+      email: row.email || '',
+      password: '',
+    })
+  }
+
+  const handleSubmit = (e) => {
+    e.preventDefault()
+    setMessage('')
+    const email = form.email.trim()
+    const password = form.password.trim()
+
     if (!email) {
-      setMessage('请先填写 plt 邮箱')
+      setMessage('请填写用户/邮箱')
       return
     }
-    if (!window.confirm(`确定保存？保存后将更新【${row.name}】发件时被 CC 的邮箱为：${email}`)) return
-    setMessage('')
-    const req = row.mappingId
-      ? api.put(`/admin/sales-email/${row.mappingId}`, { plt_email: email })
-      : api.post('/admin/sales-email', { sales_id: row.id, plt_email: email })
-    req
-      .then(() => {
-        fetchData()
-      })
-      .catch((err) => {
-        const d = err.response?.data?.detail
-        setMessage(typeof d === 'string' ? d : d?.message || '保存失败')
-      })
+    if (editing) {
+      const body = { email }
+      if (password) body.password = password
+      api.put(`/admin/sales/${editing.id}`, body)
+        .then(() => { resetForm(); fetchData() })
+        .catch((err) => {
+          const d = err.response?.data?.detail
+          setMessage(typeof d === 'string' ? d : d?.message || '保存失败')
+        })
+    } else {
+      if (!password) {
+        setMessage('新建时请填写密码')
+        return
+      }
+      api.post('/admin/sales', { email, password })
+        .then(() => { resetForm(); fetchData() })
+        .catch((err) => {
+          const d = err.response?.data?.detail
+          setMessage(typeof d === 'string' ? d : d?.message || '新建失败')
+        })
+    }
   }
 
-  const handleClear = (row) => {
-    if (!window.confirm(`确定清除【${row.name}】？该条将从表格中移除，plt 邮箱配置也会被删除。`)) return
+  const handleDelete = (row) => {
+    if (!window.confirm(`确定删除销售【${row.email}】？删除后该账号将无法登录。`)) return
     setMessage('')
-    api
-      .delete(`/admin/sales-email/sales/${row.id}`)
+    api.delete(`/admin/sales/${row.id}`)
       .then(() => fetchData())
       .catch((err) => {
         const d = err.response?.data?.detail
-        setMessage(typeof d === 'string' ? d : d?.message || '清除失败')
+        setMessage(typeof d === 'string' ? d : d?.message || '删除失败')
       })
   }
 
   return (
     <section className="section admin-block">
-      <h2 className="section-title">销售邮箱</h2>
+      <h2 className="section-title">销售用户管理</h2>
       <p className="text-muted text-sm mb-4">
-        销售注册后会自动出现在下表中，填写或修改 pltplt 邮箱后更新邮箱配置；点「清除」会从表格中移除此条并删除 pltplt 邮箱配置。
+        管理员在此创建销售账号。用户/邮箱 即登录账号，同时也是发件时被 CC 的邮箱。
       </p>
+
+      <form onSubmit={handleSubmit} className="mb-4" style={{ maxWidth: 600 }}>
+        <div className="form-group">
+          <label className="form-label">用户/邮箱</label>
+          <input
+            type="email"
+            className="input input-width-md"
+            value={form.email}
+            onChange={(e) => setForm((f) => ({ ...f, email: e.target.value }))}
+            placeholder="name@pltplt.com"
+            required
+          />
+        </div>
+        <div className="form-group">
+          <label className="form-label">{editing ? '新密码（不填则保持不变）' : '密码'}</label>
+          <input
+            type="text"
+            className="input input-width-md"
+            value={form.password}
+            onChange={(e) => setForm((f) => ({ ...f, password: e.target.value }))}
+            placeholder={editing ? '留空则不修改' : '至少 8 位，含大小写字母和数字'}
+            required={!editing}
+            minLength={editing ? undefined : 8}
+          />
+        </div>
+        <button type="submit" className="btn btn-primary">{editing ? '保存' : '新增销售'}</button>
+        {editing && (
+          <button type="button" className="btn" onClick={resetForm}>取消</button>
+        )}
+      </form>
+
+      {message && <p className="text-error mb-2">{message}</p>}
+
       {loading ? (
         <p className="text-muted">加载中…</p>
       ) : rows.length === 0 ? (
-        <p className="text-muted">当前暂无销售用户。</p>
+        <p className="text-muted">当前暂无销售用户，请在上方新增。</p>
       ) : (
-        <div className="table-wrap" style={{ maxWidth: 800 }}>
+        <div className="table-wrap" style={{ maxWidth: 720 }}>
           <table className="table">
             <thead>
               <tr>
-                <th>销售姓名</th>
-                <th>账号</th>
-                <th>角色</th>
-                <th>plt 邮箱</th>
+                <th>用户/邮箱</th>
+                <th>密码</th>
                 <th className="text-right">操作</th>
               </tr>
             </thead>
             <tbody>
               {rows.map((row) => (
                 <tr key={row.id}>
-                  <td>{row.name}</td>
-                  <td>{row.login}</td>
-                  <td>{row.role}</td>
-                  <td>
-                    <input
-                      type="email"
-                      className="input input-sm"
-                      value={row.pltEmail}
-                      onChange={(e) => handleChangeEmail(row.id, e.target.value)}
-                      placeholder="name@pltplt.com"
-                      style={{ maxWidth: 260 }}
-                    />
-                  </td>
+                  <td>{row.email || '—'}</td>
+                  <td>{row.password || '—'}</td>
                   <td className="text-right">
-                    <button type="button" className="btn" onClick={() => handleSave(row)}>
-                      保存
-                    </button>
-                    <button type="button" className="btn" onClick={() => handleClear(row)}>
-                      清除
-                    </button>
+                    <button type="button" className="btn" onClick={() => handleEdit(row)} style={{ marginRight: 8 }}>编辑</button>
+                    <button type="button" className="btn btn-danger" onClick={() => handleDelete(row)}>删除</button>
                   </td>
                 </tr>
               ))}
             </tbody>
           </table>
-        </div>
-      )}
-      {message && <p className="text-error mt-2">{message}</p>}
-    </section>
-  )
-}
-
-function AdminImages() {
-  const [list, setList] = useState([])
-  const [loading, setLoading] = useState(true)
-  const [uploading, setUploading] = useState(false)
-  const [file, setFile] = useState(null)
-  const [error, setError] = useState('')
-
-  const fetchList = () => {
-    setLoading(true)
-    api
-      .get('/admin/images')
-      .then((r) => setList(r.data || []))
-      .catch(() => setList([]))
-      .finally(() => setLoading(false))
-  }
-
-  useEffect(() => {
-    fetchList()
-  }, [])
-
-  const handleUpload = (e) => {
-    e.preventDefault()
-    setError('')
-    if (!file) {
-      setError('请先选择一张图片')
-      return
-    }
-    const formData = new FormData()
-    formData.append('file', file)
-    setUploading(true)
-    api
-      .post('/admin/images', formData, {
-        headers: { 'Content-Type': 'multipart/form-data' },
-      })
-      .then(() => {
-        setFile(null)
-        if (e.target && e.target.reset) e.target.reset()
-        fetchList()
-      })
-      .catch((err) => {
-        const d = err.response?.data?.detail
-        setError(typeof d === 'string' ? d : d?.message || err.message || '上传失败')
-      })
-      .finally(() => setUploading(false))
-  }
-
-  const handleDelete = (id) => {
-    if (!window.confirm('确定删除该图片物料？')) return
-    api.delete(`/admin/images/${id}`).then(() => fetchList())
-  }
-
-  return (
-    <section className="section admin-block">
-      <h2 className="section-title">图片物料</h2>
-      <p className="text-muted text-sm mb-4">
-        销售在「邮件预览」页可以选择使用哪些图片物料，此处由管理员统一上传与维护。
-      </p>
-      <form onSubmit={handleUpload} className="mb-4 flex items-center gap-2 flex-wrap">
-        <input
-          type="file"
-          className="input-file"
-          accept=".jpg,.jpeg,.png,.gif,.webp"
-          onChange={(e) => setFile(e.target.files?.[0] || null)}
-        />
-        <button type="submit" className="btn btn-primary" disabled={uploading}>
-          {uploading ? '上传中…' : '上传图片'}
-        </button>
-        {error && <span className="text-error">{error}</span>}
-      </form>
-      {loading ? (
-        <p className="text-muted">加载中…</p>
-      ) : list.length === 0 ? (
-        <p className="text-muted">暂无图片物料，请在上方上传。</p>
-      ) : (
-        <div className="flex flex-wrap gap-3">
-          {list.map((img) => (
-            <div key={img.id} className="card" style={{ width: 160, padding: 0, overflow: 'hidden' }}>
-              <img src={img.url} alt={img.name} style={{ display: 'block', width: '100%', height: 'auto' }} />
-              <div className="flex items-center gap-2 text-sm text-muted" style={{ padding: '4px 8px', justifyContent: 'space-between' }}>
-                <span className="cell-ellipsis" style={{ maxWidth: 100 }}>{img.name}</span>
-                <button type="button" className="btn btn-danger" onClick={() => handleDelete(img.id)} style={{ padding: '2px 8px', fontSize: 12 }}>
-                  删除
-                </button>
-              </div>
-            </div>
-          ))}
         </div>
       )}
     </section>
@@ -244,19 +168,31 @@ function AdminImages() {
 
 function AdminTemplates() {
   const [list, setList] = useState([])
+  const [images, setImages] = useState([])
   const [loading, setLoading] = useState(true)
+  const [uploading, setUploading] = useState(false)
+  const [imageError, setImageError] = useState('')
+  const [showImages, setShowImages] = useState(false) // 默认不展示图片区块；编辑或上传后展示
   const [editing, setEditing] = useState(null)
-  const [form, setForm] = useState({ name: '', content: '' })
+  const [form, setForm] = useState({ name: '', content: '', image_ids: [] })
   const [error, setError] = useState('')
   const [page, setPage] = useState(1)
   const pageSize = 10
 
   const fetchList = () => {
     setLoading(true)
-    api
-      .get('/admin/templates')
-      .then((r) => setList(r.data || []))
-      .catch(() => setList([]))
+    Promise.all([
+      api.get('/admin/templates').then((r) => r.data || []),
+      api.get('/admin/images').then((r) => r.data || []),
+    ])
+      .then(([tpls, imgs]) => {
+        setList(tpls || [])
+        setImages(imgs || [])
+      })
+      .catch(() => {
+        setList([])
+        setImages([])
+      })
       .finally(() => setLoading(false))
   }
 
@@ -276,11 +212,15 @@ function AdminTemplates() {
       setError('请先填写模版名称')
       return
     }
-    const body = { name, content: form.content.trim() }
+    const body = {
+      name,
+      content: form.content.trim(),
+      image_ids: Array.isArray(form.image_ids) && form.image_ids.length ? form.image_ids : null,
+    }
     if (editing) {
       api
         .put(`/admin/templates/${editing.id}`, body)
-        .then(() => { setEditing(null); setForm({ name: '', content: '' }); fetchList(); })
+        .then(() => { setEditing(null); setShowImages(false); setForm({ name: '', content: '', image_ids: [] }); fetchList(); })
         .catch((err) => {
           const d = err.response?.data?.detail
           setError(typeof d === 'string' ? d : d?.message || err.message || '保存失败')
@@ -288,7 +228,7 @@ function AdminTemplates() {
     } else {
       api
         .post('/admin/templates', body)
-        .then(() => { setForm({ name: '', content: '' }); fetchList(); })
+        .then(() => { setShowImages(false); setForm({ name: '', content: '', image_ids: [] }); fetchList(); })
         .catch((err) => {
           const d = err.response?.data?.detail
           setError(typeof d === 'string' ? d : d?.message || err.message || '新增失败')
@@ -298,7 +238,8 @@ function AdminTemplates() {
 
   const handleEdit = (t) => {
     setEditing(t)
-    setForm({ name: t.name, content: t.content })
+    setShowImages(true)
+    setForm({ name: t.name, content: t.content, image_ids: Array.isArray(t.image_ids) ? t.image_ids : [] })
   }
 
   const handleDelete = (id) => {
@@ -313,10 +254,89 @@ function AdminTemplates() {
       })
   }
 
+  const STATUS_LABELS = { pending: '待发布', enabled: '有效', disabled: '已禁用' }
+  const handlePublish = (t) => {
+    setError('')
+    api
+      .patch(`/admin/templates/${t.id}/publish`)
+      .then(() => fetchList())
+      .catch((err) => {
+        const d = err.response?.data?.detail
+        setError(typeof d === 'string' ? d : d?.message || err.message || '操作失败')
+      })
+  }
+  const handleDisable = (t) => {
+    if (!window.confirm('确定禁用该模版？禁用后销售端将无法使用，正在进行的发送计划将被取消。')) return
+    setError('')
+    api
+      .patch(`/admin/templates/${t.id}/disable`)
+      .then(() => fetchList())
+      .catch((err) => {
+        const d = err.response?.data?.detail
+        setError(typeof d === 'string' ? d : d?.message || err.message || '操作失败')
+      })
+  }
+
   const handleCancel = () => {
     setEditing(null)
-    setForm({ name: '', content: '' })
+    setShowImages(false)
+    setForm({ name: '', content: '', image_ids: [] })
     setError('')
+  }
+
+  const uploadImage = (pickedFile) => {
+    setImageError('')
+    if (!pickedFile) {
+      setImageError('请先选择一张图片')
+      return
+    }
+    const formData = new FormData()
+    formData.append('file', pickedFile)
+    setUploading(true)
+    api
+      .post('/admin/images', formData, { headers: { 'Content-Type': 'multipart/form-data' } })
+      .then((r) => {
+        const newId = r?.data?.id
+        // 上传即视为选中，并展示图片区块（支持多张）
+        if (typeof newId === 'number' && !Number.isNaN(newId)) {
+          setForm((f) => {
+            const prev = Array.isArray(f.image_ids) ? f.image_ids : []
+            return { ...f, image_ids: prev.includes(newId) ? prev : [...prev, newId] }
+          })
+          setShowImages(true)
+        }
+        fetchList()
+      })
+      .catch((err) => {
+        const d = err.response?.data?.detail
+        setImageError(typeof d === 'string' ? d : d?.message || err.message || '上传失败')
+      })
+      .finally(() => setUploading(false))
+  }
+
+  const handlePickImage = (pickedFile) => {
+    if (!pickedFile) return
+    uploadImage(pickedFile)
+  }
+
+  const handleDropImage = (e) => {
+    e.preventDefault()
+    if (uploading) return
+    const picked = e.dataTransfer?.files?.[0]
+    handlePickImage(picked || null)
+  }
+
+  const handleDeleteImage = (id) => {
+    if (!window.confirm('确定删除该图片物料？')) return
+    setImageError('')
+    api
+      .delete(`/admin/images/${id}`)
+      .then(() => {
+        // 若该图已被当前编辑中的模版选中，同步移除
+        setForm((f) => ({ ...f, image_ids: Array.isArray(f.image_ids) ? f.image_ids.filter((x) => x !== id) : [] }))
+        fetchList()
+      })
+      .catch((err) => setImageError(err.response?.data?.detail || err.message || '删除失败'))
   }
 
   const total = list.length
@@ -329,29 +349,105 @@ function AdminTemplates() {
 
   return (
     <section className="section admin-block">
-      <h2 className="section-title">话术模版</h2>
-      <p className="text-muted text-sm mb-4">销售在「邮件预览」页从下拉框选择模版，此处可增删改。</p>
+      <h2 className="section-title">邮件模版管理</h2>
+      <p className="text-muted text-sm mb-4">
+        每条记录是一套邮件模版：标题（唯一）+ 文字模版 + 图片物料。管理员创建模版后需通过「发布」和「禁用」管理模版状态。
+      </p>
+
       <form onSubmit={handleSubmit} className="mb-4">
         <div className="form-group">
-          <label className="form-label">模版名称</label>
+          <label className="form-label">邮件标题（唯一）</label>
           <input
             type="text"
             className="input input-width-md"
             value={form.name}
             onChange={(e) => setForm((f) => ({ ...f, name: e.target.value }))}
-            placeholder="例如：促销邀约"
+            placeholder="例如：湃乐多新产品上线"
           />
         </div>
         <div className="form-group">
-          <label className="form-label">话术内容</label>
+          <label className="form-label">文字模版</label>
           <textarea
             className="textarea"
             value={form.content}
             onChange={(e) => setForm((f) => ({ ...f, content: e.target.value }))}
-            placeholder="邮件正文……"
+            placeholder="邮件文字模版（用于 AI 生成邮件内容）……"
             rows={4}
             style={{ maxWidth: 480 }}
           />
+        </div>
+        <div className="form-group">
+          <label className="form-label">图片物料（可多选，将内嵌到正文）</label>
+          <input
+            type="file"
+            className="input-file mb-0"
+            accept=".jpg,.jpeg,.png,.gif,.webp"
+            disabled={uploading}
+            onDragOver={(e) => e.preventDefault()}
+            onDrop={handleDropImage}
+            onChange={(e) => {
+              const f = e.target.files?.[0] || null
+              // 允许连续选择同一文件：重置 input 值
+              e.target.value = ''
+              handlePickImage(f)
+            }}
+          />
+          {uploading && <div className="text-muted text-sm mt-2">上传中…</div>}
+          {imageError && <div className="text-error text-sm mt-2">{imageError}</div>}
+          {showImages && (
+            <>
+              {loading ? (
+                <p className="text-muted text-sm">加载图片列表中…</p>
+              ) : (form.image_ids || []).length === 0 ? (
+                <p className="text-muted text-sm">当前模版未选择图片。</p>
+              ) : (
+                <div className="flex flex-wrap gap-3" style={{ maxWidth: 720 }}>
+                  {images.filter((img) => (form.image_ids || []).includes(img.id)).map((img) => {
+                    const selected = true
+                    return (
+                      <div
+                        key={img.id}
+                        role="button"
+                        tabIndex={0}
+                        onClick={() => {
+                          setForm((f) => {
+                            const prev = Array.isArray(f.image_ids) ? f.image_ids : []
+                            const next = selected ? prev.filter((x) => x !== img.id) : [...prev, img.id]
+                            return { ...f, image_ids: next }
+                          })
+                        }}
+                        onKeyDown={(e) => { if (e.key === 'Enter' || e.key === ' ') { e.preventDefault(); e.currentTarget.click() } }}
+                        className="card"
+                        style={{
+                          width: 140,
+                          padding: 0,
+                          overflow: 'hidden',
+                          cursor: 'pointer',
+                          border: '2px solid var(--color-primary)',
+                          background: 'var(--color-primary-light)',
+                        }}
+                      >
+                        <img src={img.url} alt={img.name} style={{ display: 'block', width: '100%', height: 'auto' }} />
+                        <div className="flex items-center gap-2 text-sm text-muted" style={{ padding: '4px 8px', justifyContent: 'space-between' }}>
+                          <span className="cell-ellipsis" style={{ maxWidth: 90 }}>{img.name}</span>
+                          <div className="flex items-center gap-2">
+                            <button
+                              type="button"
+                              className="btn btn-danger"
+                              onClick={(e) => { e.preventDefault(); e.stopPropagation(); handleDeleteImage(img.id) }}
+                              style={{ padding: '2px 8px', fontSize: 12 }}
+                            >
+                              删除
+                            </button>
+                          </div>
+                        </div>
+                      </div>
+                    )
+                  })}
+                </div>
+              )}
+            </>
+          )}
         </div>
         <button type="submit" className="btn btn-primary">{editing ? '保存' : '新增模版'}</button>
         {editing && (
@@ -364,38 +460,82 @@ function AdminTemplates() {
       ) : list.length === 0 ? (
         <p className="text-muted">暂无模版，请在上方新增。</p>
       ) : (
-        <div className="table-wrap" style={{ maxWidth: 640 }}>
-          <table className="table">
+        <div className="table-wrap" style={{ maxWidth: 900 }}>
+          <table className="table" style={{ minWidth: 720 }}>
             <thead>
               <tr>
-                <th>名称</th>
+                <th>标题</th>
                 <th>内容摘要</th>
-                <th className="text-right">操作</th>
+                <th>图片</th>
+                <th>状态</th>
+                <th style={{ width: 200, textAlign: 'right' }}>操作</th>
               </tr>
             </thead>
             <tbody>
               {pageItems.map((t) => (
                 <tr key={t.id}>
                   <td>{t.name}</td>
-                  <td className="cell-ellipsis" style={{ maxWidth: 320 }}>{t.content?.slice(0, 60)}…</td>
-                  <td className="text-right">
-                    <button type="button" className="btn" onClick={() => handleEdit(t)}>编辑</button>
-                    <button type="button" className="btn btn-danger" onClick={() => handleDelete(t.id)}>删除</button>
+                  <td className="cell-ellipsis" style={{ maxWidth: 360 }}>{t.content?.slice(0, 60)}…</td>
+                  <td className="text-muted">{Array.isArray(t.image_ids) ? `${t.image_ids.length} 张` : '0 张'}</td>
+                  <td>
+                    <span className={(t.status || 'pending') === 'enabled' ? 'text-success' : 'text-muted'}>
+                      {STATUS_LABELS[t.status || 'pending'] || '待发布'}
+                    </span>
+                  </td>
+                  <td style={{ textAlign: 'right' }}>
+                    <div className="flex items-center gap-2" style={{ justifyContent: 'flex-end', flexWrap: 'nowrap' }}>
+                      <button
+                        type="button"
+                        className={(t.status || 'pending') === 'enabled' ? 'btn' : 'btn btn-primary'}
+                        onClick={() => handlePublish(t)}
+                        disabled={(t.status || 'pending') === 'enabled'}
+                        style={{ padding: '4px 10px', fontSize: 12 }}
+                        title={(t.status || 'pending') === 'enabled' ? '该模版已发布' : '发布后销售端可见'}
+                      >
+                        发布
+                      </button>
+                      <button
+                        type="button"
+                        className="btn"
+                        onClick={() => handleDisable(t)}
+                        disabled={(t.status || 'pending') !== 'enabled'}
+                        style={{ padding: '4px 10px', fontSize: 12 }}
+                        title={(t.status || 'pending') !== 'enabled' ? '仅对已发布的模版可禁用' : '禁用后销售端无法使用'}
+                      >
+                        禁用
+                      </button>
+                      <button type="button" className="btn" onClick={() => handleEdit(t)} style={{ padding: '4px 10px', fontSize: 12 }}>编辑</button>
+                      <button type="button" className="btn btn-danger" onClick={() => handleDelete(t.id)} style={{ padding: '4px 10px', fontSize: 12 }}>删除</button>
+                    </div>
                   </td>
                 </tr>
               ))}
             </tbody>
           </table>
-          <div className="flex items-center gap-3 mt-4">
+          <div className="flex items-center gap-3 mt-4" style={{ padding: '8px 12px' }}>
             <span className="text-muted text-sm">
               第 {safePage} / {totalPages} 页，共 {total} 条
             </span>
-            <button type="button" className="btn" onClick={() => setPage((p) => Math.max(1, p - 1))} disabled={!canPrev}>
-              上一页
-            </button>
-            <button type="button" className="btn" onClick={() => setPage((p) => Math.min(totalPages, p + 1))} disabled={!canNext}>
-              下一页
-            </button>
+            <div className="flex items-center gap-2" style={{ marginLeft: 'auto' }}>
+              <button
+                type="button"
+                className="btn"
+                onClick={() => setPage((p) => Math.max(1, p - 1))}
+                disabled={!canPrev}
+                style={{ padding: '4px 10px', fontSize: 12 }}
+              >
+                上一页
+              </button>
+              <button
+                type="button"
+                className="btn"
+                onClick={() => setPage((p) => Math.min(totalPages, p + 1))}
+                disabled={!canNext}
+                style={{ padding: '4px 10px', fontSize: 12 }}
+              >
+                下一页
+              </button>
+            </div>
           </div>
         </div>
       )}

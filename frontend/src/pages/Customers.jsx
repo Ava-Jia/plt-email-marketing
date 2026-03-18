@@ -18,7 +18,8 @@ export default function Customers() {
 
   const [summary, setSummary] = useState({ count: 0, last_updated: null })
   const [list, setList] = useState({ items: [], total: 0, page: 1, page_size: PAGE_SIZE })
-  const [file, setFile] = useState(null)
+  const [pendingFile, setPendingFile] = useState(null)
+  const [showConfirm, setShowConfirm] = useState(false)
   const [uploading, setUploading] = useState(false)
   const [message, setMessage] = useState({ type: '', text: '' })
   const [errors, setErrors] = useState([])
@@ -78,12 +79,8 @@ export default function Customers() {
       .catch(() => setMessage({ type: 'error', text: '下载失败' }))
   }
 
-  const handleSubmit = async (e) => {
-    e.preventDefault()
-    if (!file) {
-      setMessage({ type: 'error', text: '请选择文件' })
-      return
-    }
+  const doUpload = async (file) => {
+    if (!file) return
     setMessage({ type: '', text: '' })
     setErrors([])
     setUploading(true)
@@ -94,8 +91,8 @@ export default function Customers() {
         headers: { 'Content-Type': 'multipart/form-data' },
       })
       setMessage({ type: 'success', text: `上传成功，共 ${data.count} 条客户` })
-      setFile(null)
-      if (e.target.reset) e.target.reset()
+      setPendingFile(null)
+      setShowConfirm(false)
       fetchSummary()
       fetchList(1)
     } catch (err) {
@@ -109,6 +106,19 @@ export default function Customers() {
     } finally {
       setUploading(false)
     }
+  }
+
+  const handlePickFile = (f) => {
+    if (!f) return
+    setPendingFile(f)
+    setShowConfirm(true)
+  }
+
+  const handleDropFile = (e) => {
+    e.preventDefault()
+    if (uploading) return
+    const f = e.dataTransfer?.files?.[0] || null
+    handlePickFile(f)
   }
 
   const totalPages = Math.max(1, Math.ceil(list.total / list.page_size))
@@ -177,17 +187,20 @@ export default function Customers() {
 
       <section className="section">
         <h3 className="section-title">上传客户表</h3>
-        <form onSubmit={handleSubmit} className="flex items-center gap-3 flex-wrap">
-          <input
-            type="file"
-            className="input-file mb-0"
-            accept=".csv,.xlsx,.xls"
-            onChange={(e) => setFile(e.target.files?.[0] || null)}
-          />
-          <button type="submit" className="btn btn-primary" disabled={uploading}>
-            {uploading ? '上传中…' : '上传并覆盖'}
-          </button>
-        </form>
+        <input
+          type="file"
+          className="input-file mb-0"
+          accept=".csv,.xlsx,.xls"
+          disabled={uploading}
+          onDragOver={(e) => e.preventDefault()}
+          onDrop={handleDropFile}
+          onChange={(e) => {
+            const f = e.target.files?.[0] || null
+            e.target.value = ''
+            handlePickFile(f)
+          }}
+        />
+        {uploading && <div className="text-muted text-sm mt-2">上传中…</div>}
         {message.text && (
           <p className={message.type === 'error' ? 'text-error mt-4' : 'text-success mt-4'}>
             {message.text}
@@ -201,6 +214,56 @@ export default function Customers() {
           </ul>
         )}
       </section>
+
+      {showConfirm && (
+        <div
+          role="dialog"
+          aria-modal="true"
+          style={{
+            position: 'fixed',
+            inset: 0,
+            background: 'rgba(0,0,0,0.35)',
+            display: 'flex',
+            alignItems: 'center',
+            justifyContent: 'center',
+            padding: 16,
+            zIndex: 50,
+          }}
+          onClick={() => { if (!uploading) { setShowConfirm(false); setPendingFile(null) } }}
+        >
+          <div
+            className="card"
+            style={{ width: 'min(560px, 100%)', padding: 16 }}
+            onClick={(e) => e.stopPropagation()}
+          >
+            <h3 className="section-title-sm" style={{ marginTop: 0 }}>确认上传并覆盖？</h3>
+            <p className="text-muted text-sm" style={{ marginTop: 8 }}>
+              您即将上传 <strong>{pendingFile?.name || '该文件'}</strong>，系统会<strong>完全覆盖</strong>当前客户表。
+              建议您先返回并点击「下载当前客户」按钮进行备份，确认无误后再继续。
+            </p>
+            <div className="flex items-center gap-2 mt-4" style={{ justifyContent: 'flex-end' }}>
+              <button
+                type="button"
+                className="btn"
+                onClick={() => { if (!uploading) { setShowConfirm(false); setPendingFile(null) } }}
+                disabled={uploading}
+                style={{ padding: '4px 10px', fontSize: 12 }}
+              >
+                取消
+              </button>
+              <button
+                type="button"
+                className="btn btn-primary"
+                onClick={() => doUpload(pendingFile)}
+                disabled={uploading || !pendingFile}
+                style={{ padding: '4px 10px', fontSize: 12 }}
+              >
+                {uploading ? '上传中…' : '确认上传并覆盖'}
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
     </div>
   )
 }
