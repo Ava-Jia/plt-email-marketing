@@ -11,7 +11,7 @@ from sqlalchemy.orm import Session
 from app.database import get_db
 from app.dependencies import get_current_user
 from app.models import CustomerList, EmailImage, EmailTemplate, User
-from app.models.email_template import STATUS_ENABLED
+from app.models.email_template import STATUS_ENABLED, STATUS_PENDING
 from app.services.ai_content_service import get_content_for_preview
 
 logger = logging.getLogger(__name__)
@@ -112,9 +112,14 @@ def list_templates(
     current_user: User = Depends(get_current_user),
     db: Session = Depends(get_db),
 ):
-    """销售端：邮件模版下拉列表（仅返回 enabled=True 的模版）。"""
+    """邮件模版下拉列表：销售仅可见有效模版，管理员可见待发布+有效模版。"""
     _ensure_email_templates_columns(db)
-    rows = db.query(EmailTemplate).filter(EmailTemplate.status == STATUS_ENABLED).order_by(EmailTemplate.id).all()
+    if current_user.role == "admin":
+        rows = db.query(EmailTemplate).filter(
+            EmailTemplate.status.in_([STATUS_PENDING, STATUS_ENABLED]),
+        ).order_by(EmailTemplate.id).all()
+    else:
+        rows = db.query(EmailTemplate).filter(EmailTemplate.status == STATUS_ENABLED).order_by(EmailTemplate.id).all()
     items = []
     for r in rows:
         image_ids = None
@@ -139,7 +144,14 @@ def generate_preview(
     if body and body.template_id:
         tpl = db.query(EmailTemplate).filter(EmailTemplate.id == body.template_id).first()
         if tpl:
-            template_content = tpl.content or ""
+            allowed = (
+                tpl.status in (STATUS_PENDING, STATUS_ENABLED) if current_user.role == "admin"
+                else tpl.status == STATUS_ENABLED
+            )
+            if not allowed:
+                tpl = None
+            else:
+                template_content = tpl.content or ""
     tpl_images = _image_urls_for_template(db, tpl)
     tpl_image_urls = [x["url"] for x in tpl_images]
     customers = (

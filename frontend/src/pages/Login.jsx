@@ -47,7 +47,7 @@ export default function Login() {
             value={login}
             onChange={(e) => setLogin(e.target.value)}
             required
-            placeholder="用户/邮箱"
+            placeholder="name@pltplt.com"
             autoComplete="username"
           />
         </div>
@@ -59,6 +59,7 @@ export default function Login() {
             value={password}
             onChange={(e) => setPassword(e.target.value)}
             required
+            placeholder="至少 8 位，含大小写字母和数字"
             autoComplete="current-password"
           />
         </div>
