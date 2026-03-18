@@ -465,7 +465,7 @@ export default function Preview() {
                       <th>周期</th>
                       <th>进度</th>
                       <th>状态</th>
-                      <th>内容（模版+图片）</th>
+                      <th>模版</th>
                       <th>创建时间</th>
                       {isAdmin && <th>销售</th>}
                       <th className="text-right">操作</th>
@@ -480,7 +480,7 @@ export default function Preview() {
                       const imgCount = Array.isArray(templates.find((t) => t.id === s.template_id)?.image_ids)
                         ? (templates.find((t) => t.id === s.template_id)?.image_ids?.length ?? 0)
                         : 0
-                      const contentText = imgCount > 0 ? `${tplName} + ${imgCount} 张图片` : tplName
+                      const contentText = imgCount > 0 ? `${tplName}` : tplName
                       const badgeClass = s.status === 'active' ? 'badge-active' : s.status === 'sending' ? 'badge-active' : s.status === 'completed' ? 'badge-completed' : s.status === 'failed' ? 'badge-cancelled' : s.status === 'template_disabled' ? 'badge-cancelled' : 'badge-cancelled'
                       return (
                       <tr key={s.id}>
