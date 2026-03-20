@@ -7,11 +7,11 @@ export default defineConfig({
     port: 5173,
     proxy: {
       '/api': {
-        target: 'http://127.0.0.1:8000',
+        target: 'https://email-marketing-api.pltplt.com',
         changeOrigin: true,
       },
       '/uploads': {
-        target: 'http://127.0.0.1:8000',
+        target: 'https://email-marketing-api.pltplt.com',
         changeOrigin: true,
       },
     },

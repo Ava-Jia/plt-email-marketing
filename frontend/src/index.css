@@ -273,41 +273,117 @@ body {
   max-width: 280px;
 }
 
-/* 文件选择框：弱化白色块，更自然 */
-.input-file {
-  padding: var(--space-2) var(--space-3);
-  font-size: var(--text-sm);
-  color: var(--color-text-muted);
+/* 文件上传：整块虚线区域可点，无「选择文件」按钮与「未选择任何文件」文案 */
+.input-file-zone {
+  position: relative;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  box-sizing: border-box;
+  min-height: 72px;
+  padding: var(--space-5) var(--space-6);
+  max-width: 320px;
+  font-size: var(--text-base);
   background: var(--color-bg);
   border: 1px dashed var(--color-border);
   border-radius: var(--radius);
   cursor: pointer;
-  max-width: 320px;
+  transition: border-color 0.15s ease, background 0.15s ease, box-shadow 0.15s ease;
 }
-.input-file:hover {
+.input-file-zone:hover {
   border-color: var(--color-text-subtle);
   background: var(--color-surface);
 }
-.input-file::file-selector-button {
-  padding: var(--space-1) var(--space-3);
-  margin-right: var(--space-3);
-  font-size: var(--text-sm);
-  font-family: inherit;
-  color: var(--color-primary);
-  background: var(--color-primary-light);
-  border: 1px solid var(--color-border);
-  border-radius: var(--radius-sm);
-  cursor: pointer;
-}
-.input-file::file-selector-button:hover {
-  background: var(--color-surface);
+.input-file-zone:focus-within {
   border-color: var(--color-primary);
+  box-shadow: 0 0 0 2px var(--color-primary-light);
+}
+.input-file-zone:has(.input-file-zone__input:disabled) {
+  opacity: 0.65;
+  cursor: not-allowed;
+}
+.input-file-zone__input {
+  position: absolute;
+  inset: 0;
+  width: 100%;
+  height: 100%;
+  margin: 0;
+  padding: 0;
+  opacity: 0;
+  cursor: pointer;
+  font-size: 8rem; /* 扩大部分浏览器下可点击区域 */
+}
+.input-file-zone:has(.input-file-zone__input:disabled) .input-file-zone__input {
+  cursor: not-allowed;
+}
+.input-file-zone__text {
+  pointer-events: none;
+  user-select: none;
+  color: var(--color-text);
+  font-weight: 500;
 }
 .input-width-xs {
   max-width: 72px;
 }
 .input-width-md {
   max-width: 320px;
+}
+
+/* ========== 发送设置：单选（圆点） ========== */
+.send-mode-radios {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: var(--space-5);
+}
+.send-mode-radio {
+  display: inline-flex;
+  align-items: center;
+  gap: var(--space-2);
+  cursor: pointer;
+  font-size: var(--text-base);
+  color: var(--color-text);
+  user-select: none;
+}
+.send-mode-radio input {
+  position: absolute;
+  opacity: 0;
+  width: 0;
+  height: 0;
+  margin: 0;
+}
+.send-mode-radio-ui {
+  box-sizing: border-box;
+  width: 18px;
+  height: 18px;
+  border-radius: 50%;
+  border: 2px solid var(--color-border-strong);
+  background: var(--color-surface);
+  flex-shrink: 0;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  transition: border-color 0.15s ease;
+}
+.send-mode-radio:hover .send-mode-radio-ui {
+  border-color: var(--color-text-subtle);
+}
+.send-mode-radio input:checked + .send-mode-radio-ui {
+  border-color: var(--color-primary);
+}
+.send-mode-radio input:checked + .send-mode-radio-ui::after {
+  content: "";
+  width: 8px;
+  height: 8px;
+  border-radius: 50%;
+  background: var(--color-primary);
+}
+.send-mode-radio input:focus-visible + .send-mode-radio-ui {
+  outline: none;
+  box-shadow: 0 0 0 2px var(--color-primary-light);
+}
+.send-mode-radio-text {
+  line-height: 1.4;
 }
 
 /* ========== 表格 ========== */
@@ -429,6 +505,22 @@ body {
   overflow-y: auto;
   white-space: pre-wrap;
   font-size: var(--text-sm);
+}
+
+/* 表格内长文本：悬停全文浮层（Portal 到 body） */
+.hover-fulltext-popover {
+  padding: var(--space-3);
+  background: var(--color-surface);
+  color: var(--color-text);
+  border: 1px solid var(--color-border-strong);
+  border-radius: var(--radius);
+  box-shadow: 0 10px 40px rgba(15, 23, 42, 0.12);
+  font-size: var(--text-sm);
+  line-height: 1.55;
+  white-space: pre-wrap;
+  word-break: break-word;
+  overflow-y: auto;
+  pointer-events: auto;
 }
 
 /* ========== 工具类 ========== */

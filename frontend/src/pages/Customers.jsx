@@ -187,19 +187,24 @@ export default function Customers() {
 
       <section className="section">
         <h3 className="section-title">上传客户表</h3>
-        <input
-          type="file"
-          className="input-file mb-0"
-          accept=".csv,.xlsx,.xls"
-          disabled={uploading}
+        <label
+          className="input-file-zone mb-0"
           onDragOver={(e) => e.preventDefault()}
           onDrop={handleDropFile}
-          onChange={(e) => {
-            const f = e.target.files?.[0] || null
-            e.target.value = ''
-            handlePickFile(f)
-          }}
-        />
+        >
+          <input
+            type="file"
+            className="input-file-zone__input"
+            accept=".csv,.xlsx,.xls"
+            disabled={uploading}
+            onChange={(e) => {
+              const f = e.target.files?.[0] || null
+              e.target.value = ''
+              handlePickFile(f)
+            }}
+          />
+          <span className="input-file-zone__text">上传文件</span>
+        </label>
         {uploading && <div className="text-muted text-sm mt-2">上传中…</div>}
         {message.text && (
           <p className={message.type === 'error' ? 'text-error mt-4' : 'text-success mt-4'}>

@@ -2,6 +2,7 @@
  * 前端 API 客户端：请求统一走此封装，baseURL 指向后端，请求头带 token。
  */
 import axios from 'axios'
+import { clearPreviewGeneratedForUser } from '../utils/previewStorage'
 
 const baseURL = import.meta.env.VITE_API_BASE_URL || '/api'
 
@@ -24,8 +25,16 @@ api.interceptors.response.use(
   (res) => res,
   (err) => {
     if (err.response?.status === 401) {
+      let uid = null
+      try {
+        const raw = localStorage.getItem('user')
+        if (raw) uid = JSON.parse(raw).id
+      } catch {
+        /* ignore */
+      }
       localStorage.removeItem('token')
       localStorage.removeItem('user')
+      if (uid != null) clearPreviewGeneratedForUser(uid)
       window.location.href = '/login'
     }
     return Promise.reject(err)

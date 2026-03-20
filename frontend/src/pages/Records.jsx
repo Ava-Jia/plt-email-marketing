@@ -1,4 +1,5 @@
 import { useState, useEffect } from 'react'
+import HoverFullText from '../components/HoverFullText'
 import { api } from '../api/client'
 
 const STATUS_LABELS = { queued: '排队中', sent: '已发送', expired: '排队超时' }
@@ -357,6 +358,11 @@ export default function Records() {
                   const summary = `${row.subject || ''} ${imageBadge} ${row.content || ''}`.trim()
                   const short =
                     summary.length > 60 ? `${summary.slice(0, 60)}…` : summary || '（无内容）'
+                  const imageLine =
+                    Array.isArray(row.image_names) && row.image_names.length
+                      ? `附件图片：${row.image_names.join('、')}`
+                      : '附件图片：无'
+                  const detailFull = `主题：${row.subject || '（无主题）'}\n\n${row.content || '（无内容）'}\n\n${imageLine}`
 
                   return (
                     <tr key={row.id}>
@@ -379,20 +385,19 @@ export default function Records() {
                       <td>{row.from_email}</td>
                       <td>{row.cc_email || '—'}</td>
                       <td>
-                        {expandedId !== row.id && (
-                          <div className="cell-ellipsis" title={Array.isArray(row.image_names) && row.image_names.length ? `图片：${row.image_names.join('、')}` : undefined}>
-                            {short}
-                          </div>
-                        )}
-                        {expandedId === row.id && (
-                          <div className="expand-content">
-                            <div style={{ fontWeight: 500, marginBottom: 4 }}>{row.subject || '（无主题）'}</div>
-                            <div>{row.content || '（无内容）'}</div>
-                            <div className="text-muted text-sm mt-2">
-                              附件：{Array.isArray(row.image_names) && row.image_names.length ? row.image_names.join('、') : '无'}
+                        <HoverFullText fullText={detailFull} style={{ cursor: 'default' }}>
+                          {expandedId !== row.id ? (
+                            <div className="cell-ellipsis">{short}</div>
+                          ) : (
+                            <div className="expand-content">
+                              <div style={{ fontWeight: 500, marginBottom: 4 }}>{row.subject || '（无主题）'}</div>
+                              <div>{row.content || '（无内容）'}</div>
+                              <div className="text-muted text-sm mt-2">
+                                附件：{Array.isArray(row.image_names) && row.image_names.length ? row.image_names.join('、') : '无'}
+                              </div>
                             </div>
-                          </div>
-                        )}
+                          )}
+                        </HoverFullText>
                       </td>
                       <td className="text-right">
                         <div className="actions-column">

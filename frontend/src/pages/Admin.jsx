@@ -378,20 +378,24 @@ function AdminTemplates() {
         </div>
         <div className="form-group">
           <label className="form-label">图片物料（可多选，将内嵌到正文）</label>
-          <input
-            type="file"
-            className="input-file mb-0"
-            accept=".jpg,.jpeg,.png,.gif,.webp"
-            disabled={uploading}
+          <label
+            className="input-file-zone mb-0"
             onDragOver={(e) => e.preventDefault()}
             onDrop={handleDropImage}
-            onChange={(e) => {
-              const f = e.target.files?.[0] || null
-              // 允许连续选择同一文件：重置 input 值
-              e.target.value = ''
-              handlePickImage(f)
-            }}
-          />
+          >
+            <input
+              type="file"
+              className="input-file-zone__input"
+              accept=".jpg,.jpeg,.png,.gif,.webp"
+              disabled={uploading}
+              onChange={(e) => {
+                const f = e.target.files?.[0] || null
+                e.target.value = ''
+                handlePickImage(f)
+              }}
+            />
+            <span className="input-file-zone__text">上传文件</span>
+          </label>
           {uploading && <div className="text-muted text-sm mt-2">上传中…</div>}
           {imageError && <div className="text-error text-sm mt-2">{imageError}</div>}
           {showImages && (

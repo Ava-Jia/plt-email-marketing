@@ -1,4 +1,5 @@
 import { Outlet, NavLink, useNavigate } from 'react-router-dom'
+import { clearPreviewGeneratedForUser } from '../utils/previewStorage'
 
 export default function Layout() {
   const navigate = useNavigate()
@@ -6,6 +7,12 @@ export default function Layout() {
   const user = userJson ? JSON.parse(userJson) : null
 
   const handleLogout = () => {
+    try {
+      const u = userJson ? JSON.parse(userJson) : null
+      if (u?.id != null) clearPreviewGeneratedForUser(u.id)
+    } catch {
+      /* ignore */
+    }
     localStorage.removeItem('token')
     localStorage.removeItem('user')
     navigate('/login')

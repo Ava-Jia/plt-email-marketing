@@ -1,25 +1,22 @@
-import React, { useState, useEffect, useCallback } from 'react'
+import React, { useState, useEffect, useCallback, useRef } from 'react'
+import HoverFullText from '../components/HoverFullText'
 import { api } from '../api/client'
+import {
+  loadPreviewGenerated,
+  savePreviewGenerated,
+  removeLegacyPreviewStorage,
+} from '../utils/previewStorage'
 
 const PAGE_SIZE = 10
-const PREVIEW_STORAGE_KEY = 'preview_generated_content'
 const WEEKDAY_LABELS = ['周一', '周二', '周三', '周四', '周五', '周六', '周日']
 
-function loadGeneratedFromStorage() {
+function readUser() {
   try {
-    const raw = localStorage.getItem(PREVIEW_STORAGE_KEY)
-    if (!raw) return {}
-    const parsed = JSON.parse(raw)
-    return typeof parsed === 'object' ? parsed : {}
+    const j = localStorage.getItem('user')
+    return j ? JSON.parse(j) : null
   } catch {
-    return {}
+    return null
   }
-}
-
-function saveGeneratedToStorage(data) {
-  try {
-    localStorage.setItem(PREVIEW_STORAGE_KEY, JSON.stringify(data))
-  } catch {}
 }
 const STATUS_LABELS = {
   active: '进行中',
@@ -34,8 +31,9 @@ export default function Preview() {
   const [selectedId, setSelectedId] = useState('')
   const [images, setImages] = useState([])
   const [customerList, setCustomerList] = useState({ items: [], total: 0, page: 1, page_size: PAGE_SIZE })
-  const [generatedContent, setGeneratedContent] = useState(loadGeneratedFromStorage) // { `${templateId}_${customerId}`: { content, email } }
-  const [expandedRowId, setExpandedRowId] = useState(null) // customerId for 查看
+  /** 当前登录用户在客户表中存在的 id；null 表示尚未拉完（群发 payload 需等就绪，避免混入他人缓存） */
+  const [allowedCustomerIds, setAllowedCustomerIds] = useState(null)
+  const [generatedContent, setGeneratedContent] = useState(() => loadPreviewGenerated(readUser()?.id)) // `${templateId}_${customerId}` -> { content, email }
   const [generatingIds, setGeneratingIds] = useState(new Set())
   const [loading, setLoading] = useState(true)
   const [error, setError] = useState('')
@@ -51,34 +49,123 @@ export default function Preview() {
     time: '09:00',
     repeat_count: 1,
   })
-  const [customerCount, setCustomerCount] = useState(0)
+  /** customers/summary：失败时不把 count 当作 0 */
+  const [customerSummary, setCustomerSummary] = useState({ status: 'loading' })
+  /** 全量客户 id 拉取失败时的说明；降级时额外提示 */
+  const [customerIdsLoadError, setCustomerIdsLoadError] = useState(null)
+  const [customerIdsDegraded, setCustomerIdsDegraded] = useState(false)
+  const customerListRef = useRef({ items: [], total: 0, page: 1, page_size: PAGE_SIZE })
   const [queueStatus, setQueueStatus] = useState({ queued_global: 0, queued_mine: 0, rate_limit_seconds: 30, eta_minutes: 0 })
   const [queueStatusLoading, setQueueStatusLoading] = useState(false)
-  const user = (() => {
-    try {
-      const j = localStorage.getItem('user')
-      return j ? JSON.parse(j) : null
-    } catch {
-      return null
-    }
-  })()
+  const user = readUser()
+  const userId = user?.id
   const isAdmin = user?.role === 'admin'
+
+  customerListRef.current = customerList
+
+  // 切换账号 / 进入页面：去掉旧全局 key，并按用户加载专属缓存
+  useEffect(() => {
+    removeLegacyPreviewStorage()
+    if (userId == null || userId === '') {
+      setGeneratedContent({})
+      return
+    }
+    setGeneratedContent(loadPreviewGenerated(userId))
+  }, [userId])
+
+  // 拉取全部客户 id 用于过滤群发；summary 明确为 0 时跳过请求；失败保持 null 或部分/当前页降级
+  useEffect(() => {
+    if (userId == null || userId === '') {
+      setAllowedCustomerIds(new Set())
+      setCustomerIdsLoadError(null)
+      setCustomerIdsDegraded(false)
+      return
+    }
+    if (customerSummary.status === 'loading') {
+      return
+    }
+    if (customerSummary.status === 'ok' && customerSummary.count === 0) {
+      setAllowedCustomerIds(new Set())
+      setCustomerIdsLoadError(null)
+      setCustomerIdsDegraded(false)
+      return
+    }
+
+    let cancelled = false
+    setAllowedCustomerIds(null)
+    setCustomerIdsLoadError(null)
+    setCustomerIdsDegraded(false)
+
+    ;(async () => {
+      const ids = new Set()
+      const pageSize = 100
+      let page = 1
+      let total = Infinity
+      try {
+        while (!cancelled && (page - 1) * pageSize < total) {
+          const { data } = await api.get('/customers', { params: { page, page_size: pageSize } })
+          if (cancelled) return
+          for (const row of data.items || []) ids.add(row.id)
+          total = data.total ?? 0
+          page += 1
+        }
+        if (!cancelled) {
+          setAllowedCustomerIds(ids)
+          setCustomerIdsLoadError(null)
+          setCustomerIdsDegraded(false)
+        }
+      } catch {
+        if (cancelled) return
+        if (ids.size > 0) {
+          setAllowedCustomerIds(ids)
+          setCustomerIdsDegraded(true)
+          setCustomerIdsLoadError('客户列表未完全同步，仅包含已拉取部分；建议刷新页面后重试。')
+          return
+        }
+        setAllowedCustomerIds(null)
+        const pageIds = (customerListRef.current.items || []).map((r) => r.id)
+        if (pageIds.length > 0) {
+          setAllowedCustomerIds(new Set(pageIds))
+          setCustomerIdsDegraded(true)
+          setCustomerIdsLoadError(
+            '全量客户同步失败，已暂按当前表格页客户校验群发；切换分页或刷新页面后请重新同步。',
+          )
+        } else {
+          setCustomerIdsLoadError('无法加载客户列表，请刷新页面或检查网络后重试。')
+        }
+      }
+    })()
+    return () => {
+      cancelled = true
+    }
+  }, [userId, customerSummary])
 
   useEffect(() => {
     Promise.all([
       api.get('/preview/templates').then((r) => r.data),
       api.get('/preview/images').then((r) => r.data),
-      api.get('/customers/summary').then((r) => r.data).catch(() => ({ count: 0 })),
+      api
+        .get('/customers/summary')
+        .then((r) => ({ ok: true, data: r.data }))
+        .catch(() => ({ ok: false })),
     ])
-      .then(([tplList, imgList, summary]) => {
+      .then(([tplList, imgList, summaryRes]) => {
         setTemplates(tplList || [])
         setImages(imgList || [])
-        setCustomerCount(summary?.count ?? 0)
+        if (summaryRes.ok) {
+          setCustomerSummary({ status: 'ok', count: summaryRes.data?.count ?? 0 })
+        } else {
+          setCustomerSummary({
+            status: 'error',
+            message: '无法加载客户数量，客户表仍可能可用；请稍后刷新页面。',
+          })
+        }
         if ((tplList || []).length > 0 && !selectedId) setSelectedId(String((tplList || [])[0].id))
       })
       .catch((err) => {
         const d = err.response?.data?.detail
         setError(typeof d === 'string' ? d : d?.message || err.message || '加载失败')
+        setCustomerSummary({ status: 'error', message: '页面数据加载异常，请刷新重试。' })
       })
       .finally(() => setLoading(false))
   }, [])
@@ -111,8 +198,8 @@ export default function Preview() {
   }, [sendMode])
 
   useEffect(() => {
-    saveGeneratedToStorage(generatedContent)
-  }, [generatedContent])
+    savePreviewGenerated(userId, generatedContent)
+  }, [generatedContent, userId])
 
   const selectedTemplate = templates.find((t) => String(t.id) === String(selectedId))
   const displayContent = selectedTemplate ? selectedTemplate.content : ''
@@ -124,15 +211,19 @@ export default function Preview() {
   })()
 
   const fetchCustomers = useCallback((page = 1) => {
-    setExpandedRowId(null)
     api.get('/customers', { params: { page, page_size: PAGE_SIZE } })
       .then(({ data }) => setCustomerList({ items: data.items ?? [], total: data.total ?? 0, page: data.page ?? 1, page_size: data.page_size ?? PAGE_SIZE }))
       .catch(() => setCustomerList((prev) => ({ ...prev, items: [] })))
   }, [])
 
+  const summaryStatus = customerSummary.status
+  const summaryCountForEffect = customerSummary.status === 'ok' ? customerSummary.count : -1
+
   useEffect(() => {
-    if (selectedId && customerCount > 0) fetchCustomers(1)
-  }, [selectedId, customerCount, fetchCustomers])
+    if (!selectedId) return
+    if (summaryStatus === 'ok' && summaryCountForEffect === 0) return
+    fetchCustomers(1)
+  }, [selectedId, summaryStatus, summaryCountForEffect, fetchCustomers])
 
   const contentKey = (cid) => `${selectedId}_${cid}`
 
@@ -160,17 +251,24 @@ export default function Preview() {
   }
 
   const handleGenerateAll = async () => {
-    if (!selectedId || customerCount === 0) return
+    if (!selectedId) return
+    if (customerSummary.status === 'loading') return
+    if (customerSummary.status === 'ok' && customerSummary.count === 0) return
     const pageSize = 50
     let page = 1
-    let total = customerCount
+    let total = customerSummary.status === 'ok' ? customerSummary.count : Infinity
     while ((page - 1) * pageSize < total) {
       const { data } = await api.get('/customers', { params: { page, page_size: pageSize } })
       const items = data.items ?? []
-      total = data.total ?? total
+      if (total === Infinity && data.total != null) {
+        total = data.total
+      }
       for (const row of items) {
         await generateOne(row.id)
       }
+      if (items.length === 0) break
+      // summary 失败且接口未返回 total 时，用「最后一页不足 pageSize」判断结束
+      if (total === Infinity && items.length < pageSize) break
       page += 1
     }
   }
@@ -181,15 +279,26 @@ export default function Preview() {
 
   const builtItems = (() => {
     const items = []
+    const prefix = `${selectedId}_`
+    const idsReady = allowedCustomerIds !== null
     for (const [key, val] of Object.entries(generatedContent)) {
-      if (!key.startsWith(`${selectedId}_`)) continue
-      const cid = parseInt(key.split('_')[1], 10)
+      if (!key.startsWith(prefix)) continue
+      const rest = key.slice(prefix.length)
+      const cid = parseInt(rest, 10)
+      if (!Number.isFinite(cid)) continue
+      // 未得到 allowed 集合（含全量失败且未降级）前，不把本地缓存打进群发
+      if (!idsReady) continue
+      if (!allowedCustomerIds.has(cid)) continue
       if (val?.content && val?.email) {
         items.push({ customer_id: cid, to_email: val.email, content: val.content })
       }
     }
     return items
   })()
+
+  /** 仅当 summary 成功且明确为 0 时视为「真的没有客户」 */
+  const hasNoCustomersConfirmed =
+    customerSummary.status === 'ok' && customerSummary.count === 0
 
   const handleStartBatch = () => {
     setSendMessage({ type: '', text: '', fromMode: null })
@@ -302,9 +411,9 @@ export default function Preview() {
 
   return (
     <div>
-      <h1 className="page-title">邮件预览</h1>
+      <h1 className="page-title">发送邮件</h1>
       <p className="page-desc">
-        选择模版后，在下方表格中为每位客户生成邮件内容（所见即所得），再点击「开始群发」或「循环发送」时，将直接发送表格中的内容，不再重新调用 AI。
+        选择模版后，在下方表格中为每位客户生成邮件内容，再点击「开始群发」或「循环发送」时，将直接发送表格中的AI生成邮件内容。
       </p>
 
       <section className="section admin-block">
@@ -361,14 +470,23 @@ export default function Preview() {
 
       <section className="section admin-block">
         <h3 className="section-title">邮件生成表格</h3>
-        {customerCount > 0 && selectedId && (
+        {customerSummary.status === 'error' && (
+          <p className="text-error text-sm mt-2 mb-2">{customerSummary.message}</p>
+        )}
+        {customerSummary.status === 'loading' && (
+          <p className="text-muted text-sm mt-2 mb-2">正在同步客户数量…</p>
+        )}
+        {customerIdsLoadError && (
+          <p className="text-error text-sm mt-2 mb-2">{customerIdsLoadError}</p>
+        )}
+        {!hasNoCustomersConfirmed && selectedId && (
           <p className="text-primary text-sm mt-2 mb-4">
             发送内容将使用当前上方已选模版：
             <strong>{selectedTemplate?.name || '（未选模版）'}</strong>
             。
           </p>
         )}
-        {customerCount === 0 ? (
+        {hasNoCustomersConfirmed ? (
           <p className="text-muted text-sm">
             当前客户列表为空。请先在「客户管理」添加客户。
           </p>
@@ -381,12 +499,17 @@ export default function Preview() {
                 type="button"
                 className="btn btn-primary"
                 onClick={handleGenerateAll}
-                disabled={loading || generatingIds.size > 0 || customerCount === 0}
+                disabled={
+                  loading ||
+                  generatingIds.size > 0 ||
+                  hasNoCustomersConfirmed ||
+                  customerSummary.status === 'loading'
+                }
               >
                 生成邮件内容
               </button>
               <span className="text-muted text-sm">
-                已生成 {builtItems.length} 条，共 {customerList.total} 条客户
+                已生成 {builtItems.length} 条，共 {customerList.total} 条客户（本页表格）
               </span>
             </div>
             {error && <p className="text-error mb-2">{error}</p>}
@@ -399,14 +522,13 @@ export default function Preview() {
                     <th style={{ width: '10%' }}>公司特点</th>
                     <th style={{ width: '10%' }}>邮件模版</th>
                     <th style={{ width: '48%' }}>AI生成邮件内容</th>
-                    <th style={{ width: '14%' }} className="text-right">操作</th>
+                    <th style={{ width: '10%' }} className="text-right">操作</th>
                   </tr>
                 </thead>
                 <tbody>
                   {customerList.items.map((row) => {
                     const gc = generatedContent[contentKey(row.id)]
                     const isGenerating = generatingIds.has(row.id)
-                    const isExpanded = expandedRowId === row.id
                     return (
                       <tr key={row.id}>
                         <td className="cell-ellipsis">{row.customer_name || '—'}</td>
@@ -418,26 +540,18 @@ export default function Preview() {
                             <span>生成中…</span>
                           ) : !gc?.content ? (
                             <span className="text-muted">（未生成）</span>
-                          ) : !isExpanded ? (
-                            <div className="preview-content-3lines" style={{ lineHeight: 1.5, whiteSpace: 'pre-wrap', wordBreak: 'break-word' }}>
-                              {gc.content}
-                            </div>
                           ) : (
-                            <div className="expand-content" style={{ marginTop: 0 }}>
-                              {gc.content}
-                            </div>
+                            <HoverFullText fullText={gc.content} style={{ cursor: 'default' }}>
+                              <div
+                                className="preview-content-3lines"
+                                style={{ lineHeight: 1.5, whiteSpace: 'pre-wrap', wordBreak: 'break-word' }}
+                              >
+                                {gc.content}
+                              </div>
+                            </HoverFullText>
                           )}
                         </td>
                         <td className="text-right" style={{ verticalAlign: 'middle' }}>
-                          <button
-                            type="button"
-                            className="btn"
-                            style={{ marginRight: 4, padding: '2px 8px', fontSize: 12 }}
-                            onClick={() => setExpandedRowId(isExpanded ? null : row.id)}
-                            disabled={!gc?.content}
-                          >
-                            {isExpanded ? '收起' : '查看'}
-                          </button>
                           <button
                             type="button"
                             className="btn"
@@ -471,38 +585,49 @@ export default function Preview() {
 
       <section className="section admin-block">
         <h3 className="section-title">发送设置</h3>
-        {customerCount > 0 ? (
-          <p className="text-muted text-sm mt-2">
-            发送对象是当前客户列表的 <strong>{customerCount}</strong> 位客户。
-          </p>
-        ) : (
+        {hasNoCustomersConfirmed ? (
           <p className="text-error text-sm mt-2">
             请先在「客户管理」上传或添加客户列表，才能选择开始群发。
           </p>
+        ) : (
+          <p className="text-muted text-sm mt-2">
+            发送对象是当前客户列表的{' '}
+            <strong>
+              {customerSummary.status === 'ok'
+                ? customerSummary.count
+                : customerList.total > 0
+                  ? `${customerList.total}（列表已加载，客户总数摘要不可用）`
+                  : '—'}
+            </strong>{' '}
+            位客户。
+            {customerSummary.status === 'error' && customerList.total > 0 && (
+              <span className="text-muted"> 摘要接口失败时以列表为准，完整校验依赖客户同步。</span>
+            )}
+          </p>
         )}
-        <div className="flex gap-2 mb-4 flex-wrap">
-          <button
-            type="button"
-            className="btn"
-            onClick={() => setSendMode('batch')}
-            style={{
-              border: sendMode === 'batch' ? '2px solid var(--color-primary)' : undefined,
-              background: sendMode === 'batch' ? 'var(--color-primary-light)' : undefined,
-            }}
-          >
-            开始群发（立刻发）
-          </button>
-          <button
-            type="button"
-            className="btn"
-            onClick={() => setSendMode('schedule')}
-            style={{
-              border: sendMode === 'schedule' ? '2px solid var(--color-primary)' : undefined,
-              background: sendMode === 'schedule' ? 'var(--color-primary-light)' : undefined,
-            }}
-          >
-            循环发送（定时发）
-          </button>
+        <div className="send-mode-radios mb-4" role="radiogroup" aria-label="发送方式">
+          <label className="send-mode-radio">
+            <input
+              type="radio"
+              name="sendMode"
+              value="batch"
+              checked={sendMode === 'batch'}
+              onChange={() => setSendMode('batch')}
+            />
+            <span className="send-mode-radio-ui" aria-hidden />
+            <span className="send-mode-radio-text">开始群发（立刻发）</span>
+          </label>
+          <label className="send-mode-radio">
+            <input
+              type="radio"
+              name="sendMode"
+              value="schedule"
+              checked={sendMode === 'schedule'}
+              onChange={() => setSendMode('schedule')}
+            />
+            <span className="send-mode-radio-ui" aria-hidden />
+            <span className="send-mode-radio-text">循环发送（定时发）</span>
+          </label>
         </div>
         {sendMode === 'batch' && (
           <div>
