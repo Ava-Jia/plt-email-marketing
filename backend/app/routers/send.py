@@ -24,7 +24,7 @@ from app.config import settings
 from app.database import get_db, SessionLocal
 from app.dependencies import CurrentUser
 from app.models import CustomerList, EmailImage, EmailRecord, EmailTemplate, SendSchedule, User
-from app.models.email_template import STATUS_ENABLED
+from app.models.email_template import STATUS_DISABLED, STATUS_ENABLED, STATUS_PENDING
 from app.services.ai_content_service import get_content_for_preview
 from app.services.app_logger import (
   log_batch_send_created,
@@ -75,6 +75,31 @@ def _ensure_email_templates_columns(db: Session) -> None:
         db.commit()
   except Exception:
     pass
+
+
+def _template_usable_for_sending(tpl: EmailTemplate, user_role: str | None) -> bool:
+  """与 preview 一致：销售仅可用已发布模版；管理员另可用待发布；已禁用皆不可用。"""
+  st_raw = getattr(tpl, "status", None)
+  st = (st_raw if isinstance(st_raw, str) else str(st_raw or "")).strip().lower()
+  if st == STATUS_DISABLED:
+    return False
+  role = (user_role if isinstance(user_role, str) else str(user_role or "")).strip().lower()
+  if role == "admin":
+    # 空/异常状态视为待发布，避免旧库或迁移后大小写不一致导致管理员无法测发
+    return st in (STATUS_PENDING, STATUS_ENABLED) or st == ""
+  return st == STATUS_ENABLED
+
+
+def _raise_if_template_not_allowed_for_send(tpl: EmailTemplate, user_role: str | None, *, schedule: bool) -> None:
+  if _template_usable_for_sending(tpl, user_role):
+    return
+  st_raw = getattr(tpl, "status", None)
+  st = (st_raw if isinstance(st_raw, str) else str(st_raw or "")).strip().lower()
+  if st == STATUS_DISABLED:
+    detail = "该模版已禁用，无法创建计划" if schedule else "该模版已禁用，无法发送"
+  else:
+    detail = "该模版未发布或已禁用，无法创建计划" if schedule else "该模版未发布或已禁用，销售端无法使用"
+  raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=detail)
 
 
 def _get_cc_email_for_sales(db: Session, user: User) -> str | None:
@@ -853,8 +878,7 @@ def start_batch_send(
   tpl = db.query(EmailTemplate).filter(EmailTemplate.id == payload.template_id).first()
   if not tpl:
     raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="模版不存在")
-  if getattr(tpl, "status", None) != STATUS_ENABLED:
-    raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="该模版未发布或已禁用，销售端无法使用")
+  _raise_if_template_not_allowed_for_send(tpl, current_user.role, schedule=False)
   if not payload.items:
     raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="请先在预览表格中生成邮件内容")
   tpl_image_ids = []
@@ -942,8 +966,7 @@ def create_schedule(
   tpl = db.query(EmailTemplate).filter(EmailTemplate.id == payload.template_id).first()
   if not tpl:
     raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="模版不存在")
-  if getattr(tpl, "status", None) != STATUS_ENABLED:
-    raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="该模版未发布或已禁用，无法创建计划")
+  _raise_if_template_not_allowed_for_send(tpl, current_user.role, schedule=True)
 
   # 防重复：同一销售+模版+周期+时间 已存在 active 计划则拒绝
   q = db.query(SendSchedule).filter(
@@ -1155,7 +1178,9 @@ def check_and_run_schedules() -> None:
       if not row.template_id:
         continue
       tpl = db.query(EmailTemplate).filter(EmailTemplate.id == row.template_id).first()
-      if tpl and getattr(tpl, "status", None) != STATUS_ENABLED:
+      owner = db.query(User).filter(User.id == row.sales_id).first()
+      owner_role = owner.role if owner else None
+      if tpl and not _template_usable_for_sending(tpl, owner_role):
         db.query(SendSchedule).filter(SendSchedule.id == row.id).update(
           {"status": "template_disabled"},
           synchronize_session=False,

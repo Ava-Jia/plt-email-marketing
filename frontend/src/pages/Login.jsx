@@ -68,9 +68,6 @@ export default function Login() {
           {loading ? '登录中…' : '登录'}
         </button>
       </form>
-      <p className="login-footer text-muted">
-        账号由管理员创建，默认管理员：admin / Pltplt2026
-      </p>
     </div>
   )
 }
