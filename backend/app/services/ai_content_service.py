@@ -42,8 +42,8 @@ def get_content_for_preview(
             prompt += f"模版内容：{template}。围绕这次的模版内容，进行主要邮件营销内容的创作。\n"
         if customer:
             prompt += f"客户姓名：{customer}\n"
-        if region:
-            prompt += f"客户所在区域：{region}\n"
+        # if region:
+        #     prompt += f"客户所在区域：{region}\n"
         # if company_traits:
         #     prompt += f"公司特点：{company_traits}"
     prompt += "最后可以加一句，我司专业为货代公司提供换单系统等自动化解决方案，我们的产品能有效提升客户的工作效率，降低运营成本。请根据以上要求，创作一封邮件。"

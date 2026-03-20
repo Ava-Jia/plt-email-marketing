@@ -102,6 +102,14 @@ async def lifespan(app: FastAPI):
             )
         except Exception:
             pass
+        # send_schedules.draft_items：循环发送预生成内容（未跑 alembic 的生产库自动补列）
+        try:
+            info_ss = conn.exec_driver_sql("PRAGMA table_info(send_schedules)").fetchall()
+            ss_cols = {row[1] for row in info_ss}
+            if ss_cols and "draft_items" not in ss_cols:
+                conn.exec_driver_sql("ALTER TABLE send_schedules ADD COLUMN draft_items TEXT NULL")
+        except Exception:
+            pass
     _scheduler.add_job(check_and_run_schedules, "cron", minute="*", id="check_schedules", replace_existing=True)
     _scheduler.start()
     yield

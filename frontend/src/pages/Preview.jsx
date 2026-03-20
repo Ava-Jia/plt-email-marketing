@@ -394,7 +394,7 @@ export default function Preview() {
               <table className="table" style={{ minWidth: 860, tableLayout: 'fixed' }}>
                 <thead style={{ position: 'sticky', top: 0, zIndex: 1, background: 'var(--color-bg)' }}>
                   <tr>
-                    <th style={{ width: '10%' }}>客户名</th>
+                    <th style={{ width: '10%' }}>客户</th>
                     <th style={{ width: '8%' }}>地区</th>
                     <th style={{ width: '10%' }}>公司特点</th>
                     <th style={{ width: '10%' }}>邮件模版</th>
