@@ -514,14 +514,15 @@ export default function Preview() {
             </div>
             {error && <p className="text-error mb-2">{error}</p>}
             <div className="table-wrap" style={{ maxHeight: 520, overflow: 'auto' }}>
-              <table className="table" style={{ minWidth: 860, tableLayout: 'fixed' }}>
+              <table className="table" style={{ minWidth: 980, tableLayout: 'fixed' }}>
                 <thead style={{ position: 'sticky', top: 0, zIndex: 1, background: 'var(--color-bg)' }}>
                   <tr>
-                    <th style={{ width: '10%' }}>客户</th>
-                    <th style={{ width: '8%' }}>地区</th>
-                    <th style={{ width: '10%' }}>公司特点</th>
-                    <th style={{ width: '10%' }}>邮件模版</th>
-                    <th style={{ width: '48%' }}>AI生成邮件内容</th>
+                    <th style={{ width: '7%' }}>客户</th>
+                    <th style={{ width: '12%' }}>邮箱</th>
+                    <th style={{ width: '7%' }}>地区</th>
+                    <th style={{ width: '9%' }}>公司特点</th>
+                    <th style={{ width: '9%' }}>邮件模版</th>
+                    <th style={{ width: '46%' }}>AI生成邮件内容</th>
                     <th style={{ width: '10%' }} className="text-right">操作</th>
                   </tr>
                 </thead>
@@ -532,6 +533,7 @@ export default function Preview() {
                     return (
                       <tr key={row.id}>
                         <td className="cell-ellipsis">{row.customer_name || '—'}</td>
+                        <td className="cell-ellipsis" title={row.email || undefined}>{row.email || '—'}</td>
                         <td className="cell-ellipsis">{row.region || '—'}</td>
                         <td className="cell-ellipsis">{row.company_traits || '—'}</td>
                         <td className="cell-ellipsis">{selectedTemplate?.name || '—'}</td>
