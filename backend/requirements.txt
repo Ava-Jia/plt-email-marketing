@@ -17,6 +17,9 @@ bcrypt>=4.0.0
 # File / Excel (for customer upload, later)
 openpyxl>=3.1.2
 
+# Image (JPG→PNG for Foxmail inline compatibility)
+Pillow>=10.0.0
+
 # HTTP client (for AI API, later)
 httpx>=0.26.0
 

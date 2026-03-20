@@ -1,9 +1,9 @@
-"""邮件预览：模版列表、所选话术、预览生成（前 3 条客户）、图片列表。"""
+"""邮件预览：模版列表、所选话术、单条生成（AI，429 重试）、图片列表。"""
 import json
 import logging
 import os
 
-from fastapi import APIRouter, Depends
+from fastapi import APIRouter, Depends, HTTPException
 from pydantic import BaseModel
 import sqlalchemy as sa
 from sqlalchemy.orm import Session
@@ -21,6 +21,11 @@ SIGNATURE_HTML = "<div style='margin:16px 0 0;font-size:14px;line-height:1.6;col
 
 class PreviewGenerateRequest(BaseModel):
     template_id: int | None = None
+
+
+class GenerateOneRequest(BaseModel):
+    customer_id: int
+    template_id: int
 
 
 def _get_all_images(db: Session) -> list[dict]:
@@ -182,6 +187,49 @@ def generate_preview(
             "html": html,
         })
     return {"contents": contents, "template_images": tpl_images, "images": _get_all_images(db)}
+
+
+@router.post("/generate-one")
+def generate_one(
+    body: GenerateOneRequest,
+    current_user: User = Depends(get_current_user),
+    db: Session = Depends(get_db),
+):
+    """为单条客户生成邮件内容（AI）。429 时等 5 秒重试 3 次。"""
+    cust = db.query(CustomerList).filter(
+        CustomerList.id == body.customer_id,
+        CustomerList.sales_id == current_user.id,
+    ).first()
+    if not cust:
+        raise HTTPException(status_code=404, detail="客户不存在")
+    tpl = db.query(EmailTemplate).filter(EmailTemplate.id == body.template_id).first()
+    if not tpl:
+        raise HTTPException(status_code=404, detail="模版不存在")
+    allowed = (
+        tpl.status in (STATUS_PENDING, STATUS_ENABLED) if current_user.role == "admin"
+        else tpl.status == STATUS_ENABLED
+    )
+    if not allowed:
+        raise HTTPException(status_code=400, detail="该模版未发布或已禁用")
+    template_content = tpl.content or ""
+    content = get_content_for_preview(
+        customer_name=cust.customer_name,
+        region=(cust.region or "").strip() or None,
+        company_traits=(cust.company_traits or "").strip() or None,
+        template=template_content or None,
+    )
+    tpl_images = _image_urls_for_template(db, tpl)
+    tpl_image_urls = [x["url"] for x in tpl_images]
+    html = build_preview_html(content, tpl_image_urls)
+    return {
+        "customer_id": cust.id,
+        "customer_name": cust.customer_name,
+        "region": cust.region or "",
+        "company_traits": cust.company_traits or "",
+        "email": cust.email,
+        "content": content,
+        "html": html,
+    }
 
 
 @router.get("/images")

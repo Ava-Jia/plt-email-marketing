@@ -1,7 +1,26 @@
-import { useState, useEffect } from 'react'
+import React, { useState, useEffect, useCallback } from 'react'
 import { api } from '../api/client'
 
+const PAGE_SIZE = 10
+const PREVIEW_STORAGE_KEY = 'preview_generated_content'
 const WEEKDAY_LABELS = ['周一', '周二', '周三', '周四', '周五', '周六', '周日']
+
+function loadGeneratedFromStorage() {
+  try {
+    const raw = localStorage.getItem(PREVIEW_STORAGE_KEY)
+    if (!raw) return {}
+    const parsed = JSON.parse(raw)
+    return typeof parsed === 'object' ? parsed : {}
+  } catch {
+    return {}
+  }
+}
+
+function saveGeneratedToStorage(data) {
+  try {
+    localStorage.setItem(PREVIEW_STORAGE_KEY, JSON.stringify(data))
+  } catch {}
+}
 const STATUS_LABELS = {
   active: '进行中',
   sending: '发送中',
@@ -14,10 +33,11 @@ export default function Preview() {
   const [templates, setTemplates] = useState([])
   const [selectedId, setSelectedId] = useState('')
   const [images, setImages] = useState([])
-  const [contents, setContents] = useState([])
-  const [previewGeneratedOnce, setPreviewGeneratedOnce] = useState(false) // 是否已成功点击过预览生成（用于显示预览区块或空状态）
+  const [customerList, setCustomerList] = useState({ items: [], total: 0, page: 1, page_size: PAGE_SIZE })
+  const [generatedContent, setGeneratedContent] = useState(loadGeneratedFromStorage) // { `${templateId}_${customerId}`: { content, email } }
+  const [expandedRowId, setExpandedRowId] = useState(null) // customerId for 查看
+  const [generatingIds, setGeneratingIds] = useState(new Set())
   const [loading, setLoading] = useState(true)
-  const [generating, setGenerating] = useState(false)
   const [error, setError] = useState('')
   const [sending, setSending] = useState(false)
   const [sendMessage, setSendMessage] = useState({ type: '', text: '', fromMode: null }) // fromMode: 'batch' | 'schedule' | null，仅当前模式显示
@@ -90,6 +110,10 @@ export default function Preview() {
     return () => window.clearInterval(t)
   }, [sendMode])
 
+  useEffect(() => {
+    saveGeneratedToStorage(generatedContent)
+  }, [generatedContent])
+
   const selectedTemplate = templates.find((t) => String(t.id) === String(selectedId))
   const displayContent = selectedTemplate ? selectedTemplate.content : ''
 
@@ -99,31 +123,84 @@ export default function Preview() {
     return images.filter((img) => set.has(img.id))
   })()
 
-  const handleGeneratePreview = () => {
+  const fetchCustomers = useCallback((page = 1) => {
+    setExpandedRowId(null)
+    api.get('/customers', { params: { page, page_size: PAGE_SIZE } })
+      .then(({ data }) => setCustomerList({ items: data.items ?? [], total: data.total ?? 0, page: data.page ?? 1, page_size: data.page_size ?? PAGE_SIZE }))
+      .catch(() => setCustomerList((prev) => ({ ...prev, items: [] })))
+  }, [])
+
+  useEffect(() => {
+    if (selectedId && customerCount > 0) fetchCustomers(1)
+  }, [selectedId, customerCount, fetchCustomers])
+
+  const contentKey = (cid) => `${selectedId}_${cid}`
+
+  const generateOne = async (customerId) => {
+    const templateId = parseInt(selectedId, 10)
+    if (!templateId || !customerId) return
+    setGeneratingIds((s) => new Set(s).add(customerId))
     setError('')
-    setSendMessage({ type: '', text: '', fromMode: null })
-    setGenerating(true)
-    const templateId = selectedId ? parseInt(selectedId, 10) : null
-    api
-      .post('/preview', { template_id: templateId }, { timeout: 120000 })
-      .then((r) => {
-        setContents(r.data?.contents ?? [])
-        if (r.data?.images?.length) setImages(r.data.images)
-        setPreviewGeneratedOnce(true)
+    try {
+      const { data } = await api.post('/preview/generate-one', { customer_id: customerId, template_id: templateId }, { timeout: 120000 })
+      setGeneratedContent((prev) => ({
+        ...prev,
+        [contentKey(customerId)]: { content: data.content, email: data.email },
+      }))
+    } catch (err) {
+      const d = err.response?.data?.detail
+      setError(typeof d === 'string' ? d : d?.message || err.message || '生成失败')
+    } finally {
+      setGeneratingIds((s) => {
+        const next = new Set(s)
+        next.delete(customerId)
+        return next
       })
-      .catch((err) => {
-        const d = err.response?.data?.detail
-        setError(typeof d === 'string' ? d : d?.message || err.message || '生成失败')
-      })
-      .finally(() => setGenerating(false))
+    }
   }
+
+  const handleGenerateAll = async () => {
+    if (!selectedId || customerCount === 0) return
+    const pageSize = 50
+    let page = 1
+    let total = customerCount
+    while ((page - 1) * pageSize < total) {
+      const { data } = await api.get('/customers', { params: { page, page_size: pageSize } })
+      const items = data.items ?? []
+      total = data.total ?? total
+      for (const row of items) {
+        await generateOne(row.id)
+      }
+      page += 1
+    }
+  }
+
+  const handleRegenerate = (customerId) => {
+    generateOne(customerId)
+  }
+
+  const builtItems = (() => {
+    const items = []
+    for (const [key, val] of Object.entries(generatedContent)) {
+      if (!key.startsWith(`${selectedId}_`)) continue
+      const cid = parseInt(key.split('_')[1], 10)
+      if (val?.content && val?.email) {
+        items.push({ customer_id: cid, to_email: val.email, content: val.content })
+      }
+    }
+    return items
+  })()
 
   const handleStartBatch = () => {
     setSendMessage({ type: '', text: '', fromMode: null })
-    if (!window.confirm('确定开始群发吗？系统将按客户表依次发送，每 30 秒 1 封，直到全部发送完成。')) {
+    if (!builtItems.length) {
+      setSendMessage({ type: 'error', text: '请先在下方表格中生成邮件内容后再开始群发。', fromMode: 'batch' })
       return
     }
-    const templateId = selectedId ? parseInt(selectedId, 10) : null
+    if (!window.confirm(`确定开始群发吗？将发送 ${builtItems.length} 封邮件，每 30 秒 1 封。`)) {
+      return
+    }
+    const templateId = parseInt(selectedId, 10)
     if (!templateId) {
       setSendMessage({ type: 'error', text: '请先选择一套邮件模版。', fromMode: 'batch' })
       return
@@ -132,12 +209,18 @@ export default function Preview() {
     api
       .post('/send/batch', {
         template_id: templateId,
+        items: builtItems,
       })
-      .then(({ data }) => {
+      .then(() => {
         setSendMessage({
           type: 'success',
           text: '已开始后台群发。你可以在「邮件记录」查看进度。',
           fromMode: 'batch',
+        })
+        setGeneratedContent((prev) => {
+          const next = { ...prev }
+          builtItems.forEach((it) => { delete next[contentKey(it.customer_id)] })
+          return next
         })
       })
       .catch((err) => {
@@ -170,11 +253,17 @@ export default function Preview() {
       setSending(false)
       return
     }
+    if (!builtItems.length) {
+      setSendMessage({ type: 'error', text: '请先在下方表格中生成邮件内容后再创建计划。', fromMode: 'schedule' })
+      setSending(false)
+      return
+    }
     const payload = {
       recurrence_type: recurrence,
       time: `${h.toString().padStart(2, '0')}:${m.toString().padStart(2, '0')}`,
       repeat_count: Math.max(1, parseInt(scheduleForm.repeat_count, 10) || 1),
       template_id: templateId,
+      items: builtItems,
     }
     if (recurrence === 'week') {
       payload.day_of_week = scheduleForm.day_of_week
@@ -184,7 +273,12 @@ export default function Preview() {
     api
       .post('/send/schedule', payload)
       .then(() => {
-        setSendMessage({ type: 'success', text: '计划已创建，到点将使用当前所选模版与图片物料自动发送。', fromMode: 'schedule' })
+        setSendMessage({ type: 'success', text: '计划已创建，到点将使用表格中的预生成内容自动发送。', fromMode: 'schedule' })
+        setGeneratedContent((prev) => {
+          const next = { ...prev }
+          builtItems.forEach((it) => { delete next[contentKey(it.customer_id)] })
+          return next
+        })
         return fetchSchedules()
       })
       .then(() => {
@@ -210,7 +304,7 @@ export default function Preview() {
     <div>
       <h1 className="page-title">邮件预览</h1>
       <p className="page-desc">
-        选择一套邮件模版（标题 + 文字模版 + 图片），发送时将使用该模版的标题与图片，并通过AI生成个性化正文。
+        选择模版后，在下方表格中为每位客户生成邮件内容（所见即所得），再点击「开始群发」或「循环发送」时，将直接发送表格中的内容，不再重新调用 AI。
       </p>
 
       <section className="section admin-block">
@@ -265,60 +359,124 @@ export default function Preview() {
         </div>
       </section>
 
-      <button
-        type="button"
-        className="btn btn-primary mt-2 mb-6"
-        onClick={handleGeneratePreview}
-        disabled={loading || generating || !selectedId}
-      >
-        {generating ? '生成中…' : '预览生成'}
-      </button>
-
-      {previewGeneratedOnce && (
-        <section className="section admin-block">
-          <h3 className="section-title">邮件预览（前 3 条客户）</h3>
-          {contents.length === 0 ? (
-            <p className="text-muted text-sm">
-              当前客户列表为空，无法生成预览。请先在「客户管理」添加客户后再点击「预览生成」。
-            </p>
-          ) : (
-            <div className="flex gap-4" style={{ flexDirection: 'column' }}>
-              {contents.map((item, idx) => (
-                <div key={idx} className="card">
-                  <div className="text-muted text-sm mb-2">
-                    客户：{item.customer_name || '—'} 地区：{item.region || '—'} 公司特点：{item.company_traits || '—'}
-                  </div>
-                  <p className="mb-2" style={{ fontSize: 14 }}>
-                    <span style={{ color: 'var(--color-primary)', fontWeight: 500 }}>邮件主题：</span>
-                    {' '}
-                    {selectedTemplate?.name || '—'}
-                  </p>
-                  <div
-                    style={{ marginTop: 8 }}
-                    dangerouslySetInnerHTML={{ __html: item.html || '' }}
-                  />
-                </div>
-              ))}
+      <section className="section admin-block">
+        <h3 className="section-title">邮件生成表格</h3>
+        {customerCount > 0 && selectedId && (
+          <p className="text-primary text-sm mt-2 mb-4">
+            发送内容将使用当前上方已选模版：
+            <strong>{selectedTemplate?.name || '（未选模版）'}</strong>
+            。
+          </p>
+        )}
+        {customerCount === 0 ? (
+          <p className="text-muted text-sm">
+            当前客户列表为空。请先在「客户管理」添加客户。
+          </p>
+        ) : !selectedId ? (
+          <p className="text-muted text-sm">请在上方选择一套邮件模版。</p>
+        ) : (
+          <>
+            <div className="flex items-center gap-3 mb-4 flex-wrap">
+              <button
+                type="button"
+                className="btn btn-primary"
+                onClick={handleGenerateAll}
+                disabled={loading || generatingIds.size > 0 || customerCount === 0}
+              >
+                生成邮件内容
+              </button>
+              <span className="text-muted text-sm">
+                已生成 {builtItems.length} 条，共 {customerList.total} 条客户
+              </span>
             </div>
-          )}
-        </section>
-      )}
+            {error && <p className="text-error mb-2">{error}</p>}
+            <div className="table-wrap" style={{ maxHeight: 520, overflow: 'auto' }}>
+              <table className="table" style={{ minWidth: 860, tableLayout: 'fixed' }}>
+                <thead style={{ position: 'sticky', top: 0, zIndex: 1, background: 'var(--color-bg)' }}>
+                  <tr>
+                    <th style={{ width: '10%' }}>客户名</th>
+                    <th style={{ width: '8%' }}>地区</th>
+                    <th style={{ width: '10%' }}>公司特点</th>
+                    <th style={{ width: '10%' }}>邮件模版</th>
+                    <th style={{ width: '48%' }}>AI生成邮件内容</th>
+                    <th style={{ width: '14%' }} className="text-right">操作</th>
+                  </tr>
+                </thead>
+                <tbody>
+                  {customerList.items.map((row) => {
+                    const gc = generatedContent[contentKey(row.id)]
+                    const isGenerating = generatingIds.has(row.id)
+                    const isExpanded = expandedRowId === row.id
+                    return (
+                      <tr key={row.id}>
+                        <td className="cell-ellipsis">{row.customer_name || '—'}</td>
+                        <td className="cell-ellipsis">{row.region || '—'}</td>
+                        <td className="cell-ellipsis">{row.company_traits || '—'}</td>
+                        <td className="cell-ellipsis">{selectedTemplate?.name || '—'}</td>
+                        <td style={{ verticalAlign: 'top', paddingTop: 10, paddingBottom: 10, minHeight: 64 }}>
+                          {isGenerating ? (
+                            <span>生成中…</span>
+                          ) : !gc?.content ? (
+                            <span className="text-muted">（未生成）</span>
+                          ) : !isExpanded ? (
+                            <div className="preview-content-3lines" style={{ lineHeight: 1.5, whiteSpace: 'pre-wrap', wordBreak: 'break-word' }}>
+                              {gc.content}
+                            </div>
+                          ) : (
+                            <div className="expand-content" style={{ marginTop: 0 }}>
+                              {gc.content}
+                            </div>
+                          )}
+                        </td>
+                        <td className="text-right" style={{ verticalAlign: 'middle' }}>
+                          <button
+                            type="button"
+                            className="btn"
+                            style={{ marginRight: 4, padding: '2px 8px', fontSize: 12 }}
+                            onClick={() => setExpandedRowId(isExpanded ? null : row.id)}
+                            disabled={!gc?.content}
+                          >
+                            {isExpanded ? '收起' : '查看'}
+                          </button>
+                          <button
+                            type="button"
+                            className="btn"
+                            style={{ padding: '2px 8px', fontSize: 12 }}
+                            onClick={() => handleRegenerate(row.id)}
+                            disabled={isGenerating}
+                          >
+                            {isGenerating ? '…' : '重新生成'}
+                          </button>
+                        </td>
+                      </tr>
+                    )
+                  })}
+                </tbody>
+              </table>
+            </div>
+            <div className="flex items-center gap-3 mt-4">
+              <span className="text-muted text-sm">
+                第 {customerList.page} / {Math.max(1, Math.ceil(customerList.total / PAGE_SIZE))} 页，共 {customerList.total} 条
+              </span>
+              <button type="button" className="btn" onClick={() => fetchCustomers(customerList.page - 1)} disabled={customerList.page <= 1}>
+                上一页
+              </button>
+              <button type="button" className="btn" onClick={() => fetchCustomers(customerList.page + 1)} disabled={customerList.page >= Math.ceil(customerList.total / PAGE_SIZE)}>
+                下一页
+              </button>
+            </div>
+          </>
+        )}
+      </section>
 
       <section className="section admin-block">
         <h3 className="section-title">发送设置</h3>
-        <p className="text-primary text-sm mt-2">
-          发送内容将使用当前上方已选模版：
-          <strong>
-            {selectedTemplate?.name || '（未选模版）'}
-          </strong>
-          。
-        </p>
         {customerCount > 0 ? (
-          <p className="text-muted text-sm mt-1">
+          <p className="text-muted text-sm mt-2">
             发送对象是当前客户列表的 <strong>{customerCount}</strong> 位客户。
           </p>
         ) : (
-          <p className="text-error text-sm mt-1">
+          <p className="text-error text-sm mt-2">
             请先在「客户管理」上传或添加客户列表，才能选择开始群发。
           </p>
         )}
@@ -367,7 +525,7 @@ export default function Preview() {
               type="button"
               className="btn btn-primary"
               onClick={handleStartBatch}
-              disabled={sending || loading || generating || !selectedId}
+              disabled={sending || !selectedId || !builtItems.length}
             >
               {sending ? '提交中…' : '点击开始群发'}
             </button>
@@ -447,7 +605,7 @@ export default function Preview() {
                 type="button"
                 className="btn btn-primary"
                 onClick={handleCreateSchedule}
-                disabled={sending || scheduleLoading || !selectedId}
+                disabled={sending || scheduleLoading || !selectedId || !builtItems.length}
               >
                 {sending ? '提交中…' : '点击创建计划'}
               </button>

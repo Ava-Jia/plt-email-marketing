@@ -385,6 +385,13 @@ body {
   font-size: var(--text-sm);
   min-height: 60px;
 }
+.preview-content-3lines {
+  display: -webkit-box;
+  -webkit-line-clamp: 5;
+  -webkit-box-orient: vertical;
+  overflow: hidden;
+  font-size: var(--text-sm);
+}
 .expand-content {
   margin-top: var(--space-2);
   padding: var(--space-3);

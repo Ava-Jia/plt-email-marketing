@@ -71,7 +71,7 @@ def get_content_for_preview(
     logger.info("AI: 请求 url=%s model=%s prompt_len=%s", url, settings.ai_api_model, len(prompt))
     try:
         with httpx.Client(timeout=AI_REQUEST_TIMEOUT) as client:
-            for attempt in range(AI_MAX_RETRIES + 3):
+            for attempt in range(AI_MAX_RETRIES + 4):
                 try:
                     r = client.post(url, json=body, headers=headers)
                     logger.info("AI: 响应 status=%s (attempt %s)", r.status_code, attempt + 1)
@@ -94,7 +94,10 @@ def get_content_for_preview(
                     else:
                         raise
                 except httpx.HTTPStatusError as e:
-                    if e.response.status_code >= 500 and attempt < AI_MAX_RETRIES:
+                    if e.response.status_code == 429 and attempt < 3:
+                        time.sleep(5.0)
+                        logger.warning("AI: 429 限流，等待 5s 后第 %s 次重试", attempt + 1)
+                    elif e.response.status_code >= 500 and attempt < AI_MAX_RETRIES:
                         time.sleep(1.0 * (attempt + 1))
                         logger.warning("AI: 服务端错误 %s，第 %s 次重试", e.response.status_code, attempt + 1)
                     else:

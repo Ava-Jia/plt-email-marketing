@@ -18,7 +18,7 @@ export default function Layout() {
         {user && <p className="app-sidebar-user">当前用户：{user.name} ({user.role})</p>}
         <nav className="app-nav">
           <NavLink to="/customers" className={({ isActive }) => `app-nav-link${isActive ? ' active' : ''}`}>客户管理</NavLink>
-          <NavLink to="/preview" className={({ isActive }) => `app-nav-link${isActive ? ' active' : ''}`}>邮件预览</NavLink>
+          <NavLink to="/preview" className={({ isActive }) => `app-nav-link${isActive ? ' active' : ''}`}>发送邮件</NavLink>
           <NavLink to="/records" className={({ isActive }) => `app-nav-link${isActive ? ' active' : ''}`}>邮件记录</NavLink>
           {user?.role === 'admin' && <NavLink to="/admin" className={({ isActive }) => `app-nav-link${isActive ? ' active' : ''}`}>管理员配置</NavLink>}
         </nav>

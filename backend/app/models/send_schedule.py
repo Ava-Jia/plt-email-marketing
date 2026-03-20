@@ -20,4 +20,5 @@ class SendSchedule(Base):
     template_id = Column(Integer, ForeignKey("email_templates.id", ondelete="SET NULL"), nullable=True, index=True)
     image_ids = Column(String(1000), nullable=True)  # JSON 数组如 "[1,2,3]" 图片物料 id
     subject = Column(String(500), nullable=True)  # 邮件主题，为空则用模版名
+    draft_items = Column(String, nullable=True)  # JSON: [{customer_id, to_email, content}], 预生成内容
     created_at = Column(DateTime(timezone=True), server_default=func.now())

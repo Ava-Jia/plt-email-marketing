@@ -1,4 +1,5 @@
 """发送相关接口：测试发送 + 批量发送（SMTP + 限频）+ 循环发送计划。"""
+import io
 import unicodedata
 from datetime import datetime, timedelta, timezone
 from email.message import EmailMessage
@@ -8,6 +9,8 @@ from pathlib import Path
 import json
 import mimetypes
 import smtplib
+
+from PIL import Image
 import ssl
 import threading
 import time
@@ -102,8 +105,15 @@ class SendTestRequest(BaseModel):
   image_ids: list[int] | None = None
 
 
+class DraftItem(BaseModel):
+  customer_id: int
+  to_email: str
+  content: str
+
+
 class BatchSendRequest(BaseModel):
   template_id: int
+  items: list[DraftItem]  # 预生成内容，所见即所得
 
 
 class ScheduleCreateRequest(BaseModel):
@@ -113,6 +123,7 @@ class ScheduleCreateRequest(BaseModel):
   time: str  # "HH:MM"
   repeat_count: int = 1
   template_id: int  # 选择一套邮件方案（标题+文字模版+图片）
+  items: list[DraftItem] | None = None  # 预生成内容，定时发时所见即所得
 
 
 class ScheduleCancelRequest(BaseModel):
@@ -199,13 +210,29 @@ def _build_attachments_from_image_ids(
   return attachments
 
 
+def _jpeg_to_png(data: bytes) -> bytes | None:
+  """将 JPG/JPEG 转为 PNG，用于 Foxmail 等客户端的 inline 显示兼容。转换失败时返回 None。"""
+  try:
+    img = Image.open(io.BytesIO(data))
+    if img.mode in ("RGBA", "P"):
+      img = img.convert("RGBA")
+    else:
+      img = img.convert("RGB")
+    buf = io.BytesIO()
+    img.save(buf, format="PNG")
+    return buf.getvalue()
+  except Exception:
+    return None
+
+
 def _build_inline_images_from_image_ids(
   db: Session,
   image_ids: list[int] | None,
 ) -> list[dict]:
   """
   根据图片 id 列表构造 inline 图片：
-  [{"cid": "xxx", "maintype": "image", "subtype": "jpeg", "data": b"...", "filename": "a.jpg"}]
+  [{"cid": "xxx", "maintype": "image", "subtype": "png", "data": b"...", "filename": "a.png"}]
+  JPG/JPEG 会转为 PNG，以兼容 Foxmail 的 inline 显示。
   """
   if not image_ids:
     return []
@@ -227,12 +254,20 @@ def _build_inline_images_from_image_ids(
       maintype, subtype = mimetype.split("/", 1)
     else:
       maintype, subtype = "application", "octet-stream"
+    # JPG/JPEG 转 PNG，兼容 Foxmail 等客户端的 inline 显示
+    if subtype.lower() in ("jpeg", "jpg"):
+      converted = _jpeg_to_png(data)
+      if converted is not None:
+        data = converted
+        maintype, subtype = "image", "png"
     raw_name = (img.name or "").strip()
     filename = full_path.name
     if raw_name:
       filename = raw_name if Path(raw_name).suffix else f"{raw_name}{full_path.suffix}"
       if not Path(filename).suffix:
         filename = full_path.name
+    if maintype == "image" and subtype == "png":
+      filename = str(Path(filename).with_suffix(".png"))
     cid = make_msgid()[1:-1]  # 去掉尖括号，HTML 中用 cid:xxx
     out.append({"cid": cid, "maintype": maintype, "subtype": subtype, "data": data, "filename": filename})
   return out
@@ -466,63 +501,46 @@ def _run_batch_send(
         effective_image_ids = []
     inline_images = _build_inline_images_from_image_ids(db, effective_image_ids or [])
 
-    customers = (
-      db.query(CustomerList)
-      .filter(CustomerList.sales_id == sales_id)
-      .order_by(CustomerList.id)
-      .all()
-    )
-    # 按邮箱去重，同一邮箱只发一封（取第一条客户记录用于内容生成）
-    # 使用 _normalize_email_for_dedup 防止全角/零宽字符等导致同一邮箱被视为不同
-    seen_emails: set[str] = set()
-    unique_customers: list[CustomerList] = []
-    for cust in customers:
-      raw = (cust.email or "").strip()
-      if not raw:
-        continue
-      key = _normalize_email_for_dedup(raw)
-      if not key or key in seen_emails:
-        continue
-      seen_emails.add(key)
-      unique_customers.append(cust)
-
     cc_email = _get_cc_email_for_sales(db, user)
     from_email = settings.smtp_sender or settings.smtp_user
 
-    queued_count = db.query(EmailRecord).filter(
-      EmailRecord.sales_id == sales_id,
-      EmailRecord.status == "queued",
-    ).count()
-    log_batch_send_start(user.login or "", len(unique_customers), queued_count)
+    queued_records = (
+      db.query(EmailRecord)
+      .filter(
+        EmailRecord.sales_id == sales_id,
+        EmailRecord.status == "queued",
+      )
+      .order_by(EmailRecord.id)
+      .all()
+    )
+    queued_count = len(queued_records)
+    log_batch_send_start(user.login or "", queued_count, queued_count)
 
-    for cust in unique_customers:
-      raw = (cust.email or "").strip()
-      to_email = _normalize_email_for_dedup(raw) if raw else ""
+    for rec in queued_records:
+      to_email = rec.to_email or ""
+      content = (rec.content or "").strip()
+      subject = rec.subject or subject_prefix or "营销邮件"
       if not to_email:
         continue
-
-      content = get_content_for_preview(
-        customer_name=cust.customer_name,
-        region=(cust.region or "").strip() or None,
-        company_traits=(cust.company_traits or "").strip() or None,
-        template=template_content or None,
-      )
-      subject = subject_prefix if subject_prefix else "营销邮件"
-
-      # 找到一条排队中的记录
-      rec = (
-        db.query(EmailRecord)
-        .filter(
-          EmailRecord.sales_id == sales_id,
-          EmailRecord.to_email == to_email,
-          EmailRecord.status == "queued",
+      if not content:
+        cust = db.query(CustomerList).filter(
+          CustomerList.sales_id == sales_id,
+          CustomerList.email.isnot(None),
+        ).all()
+        cust_match = next(
+          (c for c in cust if _normalize_email_for_dedup((c.email or "").strip()) == to_email),
+          None,
         )
-        .order_by(EmailRecord.id)
-        .first()
-      )
-      if rec is None:
-        log_batch_skip_no_record(to_email, user.login or "")
-        continue
+        if cust_match:
+          content = get_content_for_preview(
+            customer_name=cust_match.customer_name,
+            region=(cust_match.region or "").strip() or None,
+            company_traits=(cust_match.company_traits or "").strip() or None,
+            template=template_content or None,
+          ).strip()
+        if not content:
+          log_batch_skip_no_record(to_email, user.login or "")
+          continue
 
       try:
         _send_smtp_email(to_email, subject, content, cc_email=cc_email, inline_images=inline_images)
@@ -533,22 +551,17 @@ def _run_batch_send(
           [i.get("filename") for i in inline_images if i.get("filename")],
         )
         rec.status = "sent"
-        rec.subject = subject
-        rec.content = content or ""
         rec.sent_at = datetime.now(timezone.utc)
       except HTTPException as e:
-        # 单封失败：保留队列记录，并标记为已发送但附上错误信息，避免阻塞队列
         detail = e.detail if isinstance(e.detail, str) else getattr(e.detail, "message", str(e.detail))
         log_email_failed(user.name, user.login, to_email, detail)
         rec.status = "sent"
-        rec.subject = subject or rec.subject
         rec.content = (content or "") + "\n\n[发送失败，详情见服务端日志]"
         rec.sent_at = datetime.now(timezone.utc)
 
       db.add(rec)
       db.commit()
 
-      # 已发送一封，更新全局待发送数
       _global_pending_emails = max(0, _global_pending_emails - 1)
 
     # 仅当完整跑完发送循环后才更新计划状态（未抛异常、未提前 return）
@@ -607,7 +620,7 @@ def _mark_schedule_failed(schedule_ids: int | list[int]) -> None:
 
 
 def _create_queued_records_for_sales(db: Session, sales_id: int, image_ids: list[int] | None = None) -> int:
-  """为该销售的所有客户创建 status=queued 的 EmailRecord，返回创建条数。同一邮箱只创建一条，避免重复发送。"""
+  """为该销售的所有客户创建 status=queued 的 EmailRecord（空 content），返回创建条数。同一邮箱只创建一条。"""
   user = db.query(User).filter(User.id == sales_id).first()
   if not user:
     return 0
@@ -645,6 +658,44 @@ def _create_queued_records_for_sales(db: Session, sales_id: int, image_ids: list
   return n
 
 
+def _create_queued_records_from_draft(
+  db: Session,
+  sales_id: int,
+  items: list[DraftItem],
+  template_name: str,
+  image_ids: list[int] | None = None,
+) -> int:
+  """从预生成内容创建 status=queued 的 EmailRecord，content 已填充。"""
+  user = db.query(User).filter(User.id == sales_id).first()
+  if not user:
+    return 0
+  from_email = settings.smtp_sender or settings.smtp_user
+  cc_email = _get_cc_email_for_sales(db, user)
+  seen_emails: set[str] = set()
+  n = 0
+  for it in items:
+    to_email = _normalize_email_for_dedup((it.to_email or "").strip())
+    if not to_email:
+      continue
+    if to_email in seen_emails:
+      continue
+    seen_emails.add(to_email)
+    rec = EmailRecord(
+      sales_id=sales_id,
+      to_email=to_email,
+      from_email=from_email,
+      cc_email=cc_email,
+      subject=template_name or "营销邮件",
+      content=it.content or "",
+      image_ids=json.dumps(image_ids or []),
+      status="queued",
+    )
+    db.add(rec)
+    n += 1
+  db.commit()
+  return n
+
+
 @router.post("/batch")
 def start_batch_send(
   payload: BatchSendRequest,
@@ -652,7 +703,7 @@ def start_batch_send(
   current_user: CurrentUser,
   db: Session = Depends(get_db),
 ):
-  """开始批量发送：对当前销售的客户表按顺序依次发送，每 30 秒 1 封（全销售共享限速队列）。"""
+  """开始批量发送：使用预生成内容所见即所得，按队列顺序依次发送，每 30 秒 1 封。"""
   global _global_pending_emails
 
   _ensure_email_templates_columns(db)
@@ -661,14 +712,19 @@ def start_batch_send(
     raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="模版不存在")
   if getattr(tpl, "status", None) != STATUS_ENABLED:
     raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="该模版未发布或已禁用，销售端无法使用")
+  if not payload.items:
+    raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="请先在预览表格中生成邮件内容")
   tpl_image_ids = []
   try:
     tpl_image_ids = json.loads(getattr(tpl, "image_ids", None) or "[]") or []
   except Exception:
     tpl_image_ids = []
-  n = _create_queued_records_for_sales(db, current_user.id, tpl_image_ids)
+  tpl_name = (tpl.name or "").strip() or "营销邮件"
+  n = _create_queued_records_from_draft(
+    db, current_user.id, payload.items, tpl_name, tpl_image_ids
+  )
   _global_pending_emails += n
-  tpl_name, img_names = _resolve_template_and_image_names(db, payload.template_id, tpl_image_ids)
+  _, img_names = _resolve_template_and_image_names(db, payload.template_id, tpl_image_ids)
   log_batch_send_created(current_user.name, current_user.login, tpl_name, img_names)
 
   background_tasks.add_task(
@@ -681,7 +737,7 @@ def start_batch_send(
   )
   return {
     "status": "accepted",
-    "detail": "已开始后台群发，将按队列顺序依次发送全部客户。你可以在「邮件记录」查看进度。",
+    "detail": "已开始后台群发，将按队列顺序依次发送。你可以在「邮件记录」查看进度。",
   }
 
 
@@ -753,6 +809,12 @@ def create_schedule(
   if q.first():
     raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="该模版在此时间已存在进行中的计划，请勿重复创建")
 
+  draft_items_json = None
+  if payload.items:
+    draft_items_json = json.dumps(
+      [{"customer_id": i.customer_id, "to_email": i.to_email, "content": i.content} for i in payload.items],
+      ensure_ascii=False,
+    )
   row = SendSchedule(
     sales_id=current_user.id,
     recurrence_type=recurrence,
@@ -765,6 +827,7 @@ def create_schedule(
     template_id=payload.template_id,
     image_ids=None,
     subject=None,
+    draft_items=draft_items_json,
   )
   db.add(row)
   db.commit()
@@ -961,7 +1024,20 @@ def check_and_run_schedules() -> None:
             image_ids = json.loads(getattr(tpl, "image_ids", None) or "[]") or []
           except Exception:
             image_ids = []
-      n = _create_queued_records_for_sales(db, sales_id, image_ids or [])
+      draft_items_raw = getattr(row0, "draft_items", None)
+      if draft_items_raw:
+        try:
+          items_data = json.loads(draft_items_raw)
+          items = [DraftItem(**x) for x in items_data]
+          tpl = db.query(EmailTemplate).filter(EmailTemplate.id == template_id).first()
+          tpl_name = (tpl.name or "").strip() if tpl else "营销邮件"
+          n = _create_queued_records_from_draft(
+            db, sales_id, items, tpl_name, image_ids or []
+          )
+        except Exception:
+          n = _create_queued_records_for_sales(db, sales_id, image_ids or [])
+      else:
+        n = _create_queued_records_for_sales(db, sales_id, image_ids or [])
       total_queued += n
       _global_pending_emails += n
       for r in group:
