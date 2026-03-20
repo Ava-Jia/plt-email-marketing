@@ -4,7 +4,7 @@ import { api } from '../api/client'
 export default function Admin() {
   return (
     <div>
-      <h1 className="page-title">管理员</h1>
+      <h1 className="page-title">管理员配置</h1>
       <p className="page-desc">
         维护销售邮箱、邮件模版等。
       </p>

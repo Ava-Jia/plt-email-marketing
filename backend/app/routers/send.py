@@ -42,6 +42,9 @@ router = APIRouter(prefix="/send", tags=["send"])
 
 SIGNATURE_TEXT = "此致\n湃乐多航运科技"
 
+# 测试发信：限制收件人数量，防止滥用 SMTP
+MAX_TEST_TO_EMAILS = 15
+
 
 def _normalize_email_for_dedup(raw: str) -> str:
   """规范化邮箱用于去重：strip、小写、Unicode 标准化、移除不可见字符。
@@ -98,8 +101,112 @@ def _resolve_template_and_image_names(
   return template_name, image_names
 
 
+def _normalize_test_recipient_emails(
+  db: Session,
+  current_user: User,
+  raw_emails: list[str],
+) -> list[str]:
+  """销售：仅允许发往本人客户表中的邮箱；管理员：允许任意地址（便于运维自测）。"""
+  normalized: list[str] = []
+  seen: set[str] = set()
+  for e in raw_emails or []:
+    key = _normalize_email_for_dedup((e or "").strip())
+    if not key or key in seen:
+      continue
+    seen.add(key)
+    normalized.append(key)
+  if len(normalized) > MAX_TEST_TO_EMAILS:
+    raise HTTPException(
+      status_code=status.HTTP_400_BAD_REQUEST,
+      detail=f"测试收件人最多 {MAX_TEST_TO_EMAILS} 个",
+    )
+  if not normalized:
+    raise HTTPException(
+      status_code=status.HTTP_400_BAD_REQUEST,
+      detail="请填写至少一个测试收件人邮箱。",
+    )
+  if (current_user.role or "") == "admin":
+    return normalized
+  allowed = {
+    _normalize_email_for_dedup((c.email or "").strip())
+    for c in db.query(CustomerList)
+    .filter(CustomerList.sales_id == current_user.id)
+    .all()
+  }
+  allowed.discard("")
+  bad = [e for e in normalized if e not in allowed]
+  if bad:
+    raise HTTPException(
+      status_code=status.HTTP_400_BAD_REQUEST,
+      detail="测试邮件仅能发往您客户表中的邮箱。以下地址不在列表中："
+      + ", ".join(bad[:10])
+      + ("…" if len(bad) > 10 else ""),
+    )
+  return normalized
+
+
+def _normalize_test_image_ids(
+  db: Session,
+  image_ids: list[int] | None,
+  *,
+  is_admin: bool,
+) -> list[int]:
+  """
+  销售测试发信：仅允许使用「至少关联一个已发布模版」的图片 ID，缓解对 uploads 的 IDOR 枚举。
+  管理员：允许任意已存在的 EmailImage。
+  """
+  if not image_ids:
+    return []
+  try:
+    ids = [int(x) for x in image_ids]
+  except (TypeError, ValueError):
+    raise HTTPException(
+      status_code=status.HTTP_400_BAD_REQUEST,
+      detail="image_ids 须为整数列表",
+    )
+  # 去重保序
+  uniq: list[int] = []
+  seen: set[int] = set()
+  for i in ids:
+    if i not in seen:
+      seen.add(i)
+      uniq.append(i)
+  if is_admin:
+    rows = db.query(EmailImage.id).filter(EmailImage.id.in_(uniq)).all()
+    found = {r.id for r in rows}
+    missing = [i for i in uniq if i not in found]
+    if missing:
+      raise HTTPException(
+        status_code=status.HTTP_400_BAD_REQUEST,
+        detail=f"图片 ID 不存在: {missing}",
+      )
+    return uniq
+  allowed_ids: set[int] = set()
+  for t in db.query(EmailTemplate).filter(EmailTemplate.status == STATUS_ENABLED).all():
+    try:
+      for raw in json.loads(getattr(t, "image_ids", None) or "[]") or []:
+        allowed_ids.add(int(raw))
+    except (TypeError, ValueError, json.JSONDecodeError):
+      continue
+  bad = [i for i in uniq if i not in allowed_ids]
+  if bad:
+    raise HTTPException(
+      status_code=status.HTTP_400_BAD_REQUEST,
+      detail=f"以下图片未关联已发布模版，无法在测试邮件中使用: {bad}",
+    )
+  rows = db.query(EmailImage.id).filter(EmailImage.id.in_(uniq)).all()
+  found = {r.id for r in rows}
+  missing = [i for i in uniq if i not in found]
+  if missing:
+    raise HTTPException(
+      status_code=status.HTTP_400_BAD_REQUEST,
+      detail=f"图片 ID 不存在: {missing}",
+    )
+  return uniq
+
+
 class SendTestRequest(BaseModel):
-  to_emails: list[str]  # 测试收件人邮箱，一个或多个，与客户表无关
+  to_emails: list[str]  # 销售仅限本人客户表邮箱；管理员可任意
   subject: str
   content: str
   image_ids: list[int] | None = None
@@ -109,6 +216,41 @@ class DraftItem(BaseModel):
   customer_id: int
   to_email: str
   content: str
+
+
+def _resolve_validated_draft_items(
+  db: Session,
+  sales_id: int,
+  items: list[DraftItem],
+) -> tuple[list[DraftItem] | None, str | None]:
+  """
+  校验每条草稿：customer_id 必须属于该销售，且请求中的 to_email 与库中规范化邮箱一致。
+  成功时返回以库中邮箱为准的 DraftItem 列表（防止客户端篡改收件人）。
+  """
+  if not items:
+    return None, "没有可发送条目"
+  validated: list[DraftItem] = []
+  for idx, it in enumerate(items):
+    cid = it.customer_id
+    cust = (
+      db.query(CustomerList)
+      .filter(CustomerList.id == cid, CustomerList.sales_id == sales_id)
+      .first()
+    )
+    if not cust:
+      return None, f"客户 ID {cid} 不存在或不属于当前账号（第 {idx + 1} 条）"
+    db_email = _normalize_email_for_dedup((cust.email or "").strip())
+    if not db_email:
+      return None, f"客户 ID {cid} 未配置有效邮箱"
+    req_email = _normalize_email_for_dedup((it.to_email or "").strip())
+    if req_email != db_email:
+      return None, (
+        f"客户 ID {cid} 的收件邮箱与系统中不一致，请刷新预览后重试（第 {idx + 1} 条）"
+      )
+    validated.append(
+      DraftItem(customer_id=cid, to_email=db_email, content=it.content or "")
+    )
+  return validated, None
 
 
 class BatchSendRequest(BaseModel):
@@ -379,13 +521,7 @@ def send_test_email(
   current_user: CurrentUser,
   db: Session = Depends(get_db),
 ):
-  """发送测试邮件：收件人由请求体 to_emails 指定（与客户表无关），Cc 为当前销售的 cc 邮箱；限频：每位销售每 30 秒 1 封。"""
-  emails = [(e or "").strip() for e in (payload.to_emails or []) if (e or "").strip()]
-  if not emails:
-    raise HTTPException(
-      status_code=status.HTTP_400_BAD_REQUEST,
-      detail="请填写至少一个测试收件人邮箱。",
-    )
+  """发送测试邮件：销售仅可发往本人客户表邮箱；管理员可任意地址。Cc 为当前用户 cc 邮箱；限频每 30 秒 1 次请求。"""
   if not payload.content.strip():
     raise HTTPException(
       status_code=status.HTTP_400_BAD_REQUEST,
@@ -401,9 +537,16 @@ def send_test_email(
       detail="发送太频繁，每 30 秒仅可发送 1 封邮件。",
     )
 
+  emails = _normalize_test_recipient_emails(db, current_user, payload.to_emails or [])
+  safe_image_ids = _normalize_test_image_ids(
+    db,
+    payload.image_ids,
+    is_admin=(current_user.role or "") == "admin",
+  )
+
   _ensure_smtp_config()
   cc_email = _get_cc_email_for_sales(db, current_user)
-  inline_images = _build_inline_images_from_image_ids(db, payload.image_ids or [])
+  inline_images = _build_inline_images_from_image_ids(db, safe_image_ids)
   subject = payload.subject or "邮件预览测试"
   content = payload.content or ""
   sent_list: list[str] = []
@@ -425,7 +568,7 @@ def send_test_email(
         cc_email=cc_email,
         subject=subject,
         content=content,
-        image_ids=json.dumps(payload.image_ids or []),
+        image_ids=json.dumps(safe_image_ids),
         status="sent",
         sent_at=datetime.now(timezone.utc),
       )
@@ -720,8 +863,16 @@ def start_batch_send(
   except Exception:
     tpl_image_ids = []
   tpl_name = (tpl.name or "").strip() or "营销邮件"
+  validated_items, draft_err = _resolve_validated_draft_items(
+    db, current_user.id, payload.items
+  )
+  if draft_err or not validated_items:
+    raise HTTPException(
+      status_code=status.HTTP_400_BAD_REQUEST,
+      detail=draft_err or "草稿校验失败",
+    )
   n = _create_queued_records_from_draft(
-    db, current_user.id, payload.items, tpl_name, tpl_image_ids
+    db, current_user.id, validated_items, tpl_name, tpl_image_ids
   )
   _global_pending_emails += n
   _, img_names = _resolve_template_and_image_names(db, payload.template_id, tpl_image_ids)
@@ -811,8 +962,19 @@ def create_schedule(
 
   draft_items_json = None
   if payload.items:
+    validated_schedule_items, sch_err = _resolve_validated_draft_items(
+      db, current_user.id, payload.items
+    )
+    if sch_err or not validated_schedule_items:
+      raise HTTPException(
+        status_code=status.HTTP_400_BAD_REQUEST,
+        detail=sch_err or "草稿校验失败",
+      )
     draft_items_json = json.dumps(
-      [{"customer_id": i.customer_id, "to_email": i.to_email, "content": i.content} for i in payload.items],
+      [
+        {"customer_id": i.customer_id, "to_email": i.to_email, "content": i.content}
+        for i in validated_schedule_items
+      ],
       ensure_ascii=False,
     )
   row = SendSchedule(
@@ -1031,11 +1193,28 @@ def check_and_run_schedules() -> None:
           items = [DraftItem(**x) for x in items_data]
           tpl = db.query(EmailTemplate).filter(EmailTemplate.id == template_id).first()
           tpl_name = (tpl.name or "").strip() if tpl else "营销邮件"
+          resolved, derr = _resolve_validated_draft_items(db, sales_id, items)
+          if derr or not resolved:
+            for r in group:
+              db.query(SendSchedule).filter(SendSchedule.id == r.id).update(
+                {"status": "failed"},
+                synchronize_session=False,
+              )
+            db.commit()
+            log_schedule_failed(schedule_ids, derr or "draft_items 归属/邮箱校验失败")
+            continue
           n = _create_queued_records_from_draft(
-            db, sales_id, items, tpl_name, image_ids or []
+            db, sales_id, resolved, tpl_name, image_ids or []
           )
-        except Exception:
-          n = _create_queued_records_for_sales(db, sales_id, image_ids or [])
+        except Exception as e:
+          for r in group:
+            db.query(SendSchedule).filter(SendSchedule.id == r.id).update(
+              {"status": "failed"},
+              synchronize_session=False,
+            )
+          db.commit()
+          log_schedule_failed(schedule_ids, f"draft_items 解析或校验异常: {e}")
+          continue
       else:
         n = _create_queued_records_for_sales(db, sales_id, image_ids or [])
       total_queued += n
