@@ -18,6 +18,8 @@ class EmailTemplate(Base):
     name = Column(String(128), nullable=False)
     # 文字模版（可作为 AI prompt 的模板）
     content = Column(Text, nullable=False)
+    # 固定正文：不经 AI，发出时紧接在 AI 生成内容之后、图片物料之前
+    fixed_text = Column(Text, nullable=True)
     # JSON 数组字符串，如 "[1,2,3]"，表示该模版默认包含的图片物料 id
     image_ids = Column(String(1000), nullable=True)
     status = Column(String(20), nullable=False, default=STATUS_PENDING)

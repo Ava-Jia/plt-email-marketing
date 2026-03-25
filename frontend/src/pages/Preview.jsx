@@ -203,6 +203,7 @@ export default function Preview() {
 
   const selectedTemplate = templates.find((t) => String(t.id) === String(selectedId))
   const displayContent = selectedTemplate ? selectedTemplate.content : ''
+  const displayFixedText = (selectedTemplate?.fixed_text || '').trim()
 
   const selectedImages = (() => {
     const ids = Array.isArray(selectedTemplate?.image_ids) ? selectedTemplate.image_ids : []
@@ -443,6 +444,12 @@ export default function Preview() {
           </div>
         </div>
         <div style={{ marginTop: 16 }}>
+          <h3 className="section-title-sm">固定文本</h3>
+          <div style={{ marginTop: 8, whiteSpace: 'pre-wrap', wordBreak: 'break-word' }} className={displayFixedText ? '' : 'text-muted'}>
+            {loading ? '加载中…' : displayFixedText || '（该模版未配置固定文本）'}
+          </div>
+        </div>
+        <div style={{ marginTop: 16 }}>
           <h3 className="section-title-sm">模版图片</h3>
           {loading ? (
             <p className="text-muted">加载中…</p>
@@ -514,15 +521,16 @@ export default function Preview() {
             </div>
             {error && <p className="text-error mb-2">{error}</p>}
             <div className="table-wrap" style={{ maxHeight: 520, overflow: 'auto' }}>
-              <table className="table" style={{ minWidth: 980, tableLayout: 'fixed' }}>
+              <table className="table" style={{ minWidth: 1100, tableLayout: 'fixed' }}>
                 <thead style={{ position: 'sticky', top: 0, zIndex: 1, background: 'var(--color-bg)' }}>
                   <tr>
                     <th style={{ width: '7%' }}>客户</th>
-                    <th style={{ width: '12%' }}>邮箱</th>
-                    <th style={{ width: '7%' }}>地区</th>
-                    <th style={{ width: '9%' }}>公司特点</th>
-                    <th style={{ width: '9%' }}>邮件模版</th>
-                    <th style={{ width: '46%' }}>AI生成邮件内容</th>
+                    <th style={{ width: '11%' }}>邮箱</th>
+                    <th style={{ width: '6%' }}>地区</th>
+                    <th style={{ width: '8%' }}>公司特点</th>
+                    <th style={{ width: '8%' }}>邮件模版</th>
+                    <th style={{ width: '12%' }}>固定文本</th>
+                    <th style={{ width: '38%' }}>AI生成邮件内容</th>
                     <th style={{ width: '10%' }} className="text-right">操作</th>
                   </tr>
                 </thead>
@@ -537,6 +545,15 @@ export default function Preview() {
                         <td className="cell-ellipsis">{row.region || '—'}</td>
                         <td className="cell-ellipsis">{row.company_traits || '—'}</td>
                         <td className="cell-ellipsis">{selectedTemplate?.name || '—'}</td>
+                        <td
+                          className="cell-ellipsis text-muted"
+                          style={{ maxWidth: 0 }}
+                          title={displayFixedText || undefined}
+                        >
+                          {displayFixedText
+                            ? `${displayFixedText.slice(0, 48)}${displayFixedText.length > 48 ? '…' : ''}`
+                            : '—'}
+                        </td>
                         <td style={{ verticalAlign: 'top', paddingTop: 10, paddingBottom: 10, minHeight: 64 }}>
                           {isGenerating ? (
                             <span>生成中…</span>
@@ -589,7 +606,7 @@ export default function Preview() {
         <h3 className="section-title">发送设置</h3>
         {hasNoCustomersConfirmed ? (
           <p className="text-error text-sm mt-2">
-            请先在「客户管理」上传或添加客户列表，才能选择开始群发。
+            请先在「客户管理」上传客户列表，才能选择开始发送。
           </p>
         ) : (
           <p className="text-muted text-sm mt-2">

@@ -48,6 +48,19 @@ async def lifespan(app: FastAPI):
             usr_cols = {row[1] for row in info_usr}
             if "password_plain" not in usr_cols:
                 conn.execute(text("ALTER TABLE users ADD COLUMN password_plain VARCHAR(128) NULL"))
+            if "contact_phone" not in usr_cols:
+                conn.execute(text("ALTER TABLE users ADD COLUMN contact_phone VARCHAR(64) NULL"))
+    except Exception:
+        pass
+    # 非 SQLite：用 inspect 补列（PostgreSQL 等）
+    try:
+        from sqlalchemy import inspect, text as sql_text
+        insp = inspect(engine)
+        if insp.has_table("users"):
+            usr_cols = {c["name"] for c in insp.get_columns("users")}
+            if "contact_phone" not in usr_cols:
+                with engine.begin() as conn:
+                    conn.execute(sql_text("ALTER TABLE users ADD COLUMN contact_phone VARCHAR(64) NULL"))
     except Exception:
         pass
     # 若无任何用户则创建默认管理员（仅开发/首次部署方便）
@@ -87,6 +100,9 @@ async def lifespan(app: FastAPI):
                 conn.exec_driver_sql("UPDATE email_templates SET status='disabled' WHERE enabled=0")
             else:
                 conn.exec_driver_sql("UPDATE email_templates SET status='enabled'")
+        info_tpl2 = conn.exec_driver_sql("PRAGMA table_info(email_templates)").fetchall()
+        if "fixed_text" not in {row[1] for row in info_tpl2}:
+            conn.exec_driver_sql("ALTER TABLE email_templates ADD COLUMN fixed_text TEXT NULL")
         # 迁移：将因模版禁用而取消的计划 status 从 cancelled 改为 template_disabled
         try:
             conn.exec_driver_sql(

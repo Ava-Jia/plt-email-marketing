@@ -4,11 +4,25 @@ from pydantic import BaseModel, field_validator
 
 EMAIL_RE = re.compile(r"^[^\s@]+@[^\s@]+\.[^\s@]+$")
 
+_MAX_PHONE_LEN = 64
+
+
+def _normalize_phone(v: str | None) -> str | None:
+    if v is None:
+        return None
+    s = (v or "").strip()
+    if not s:
+        return None
+    if len(s) > _MAX_PHONE_LEN:
+        raise ValueError(f"联系方式最多 {_MAX_PHONE_LEN} 个字符")
+    return s
+
 
 class SalesUserCreate(BaseModel):
-    """新建销售：用户/邮箱、密码。邮箱用于登录，同时也是发件时被 CC 的邮箱。"""
+    """新建销售：用户/邮箱、密码。邮箱用于登录，同时是发件时被 CC 的邮箱。"""
     email: str
     password: str
+    contact_phone: str | None = None
 
     @field_validator("email")
     @classmethod
@@ -36,11 +50,17 @@ class SalesUserCreate(BaseModel):
             raise ValueError("密码需包含数字")
         return v
 
+    @field_validator("contact_phone")
+    @classmethod
+    def phone_ok(cls, v: str | None) -> str | None:
+        return _normalize_phone(v)
+
 
 class SalesUserUpdate(BaseModel):
-    """编辑销售：用户/邮箱、密码(可选)。"""
+    """编辑销售：用户/邮箱、密码(可选)、联系方式(可选，传空字符串可清空)。"""
     email: str | None = None
     password: str | None = None
+    contact_phone: str | None = None
 
     @field_validator("email")
     @classmethod
@@ -70,12 +90,20 @@ class SalesUserUpdate(BaseModel):
             raise ValueError("密码需包含数字")
         return v
 
+    @field_validator("contact_phone")
+    @classmethod
+    def phone_ok(cls, v: str | None) -> str | None:
+        if v is None:
+            return None
+        return _normalize_phone(v)
+
 
 class SalesUserRead(BaseModel):
     id: int
     email: str  # 用户/邮箱，用于登录及 CC
     role: str
     password: str = ""  # 明文密码，管理员可见
+    contact_phone: str = ""
 
     class Config:
         from_attributes = True

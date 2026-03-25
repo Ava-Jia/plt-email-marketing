@@ -40,10 +40,46 @@ from app.services.app_logger import (
 
 router = APIRouter(prefix="/send", tags=["send"])
 
-SIGNATURE_TEXT = "此致\n湃乐多航运科技"
-
 # 测试发信：限制收件人数量，防止滥用 SMTP
 MAX_TEST_TO_EMAILS = 15
+
+
+def _sales_footer_email(user: User) -> str:
+  """落款用的销售邮箱展示：优先 cc_email，否则 login。"""
+  return ((user.cc_email or user.login or "").strip()) or ""
+
+
+def _signature_plain(sales_email: str | None, sales_phone: str | None) -> str:
+  """此致 + 公司名；若有邮箱则追加「联系方式： 邮箱地址：…」有电话时再带「联系电话」。"""
+  base = "此致\n湃乐多航运科技"
+  em = (sales_email or "").strip()
+  ph = (sales_phone or "").strip()
+  if not em:
+    return base
+  if ph:
+    contact = f"联系方式： 邮箱地址：{em}， 联系电话：{ph}"
+  else:
+    contact = f"联系方式： 邮箱地址：{em}"
+  return f"{base}\n{contact}"
+
+
+def _signature_html(sales_email: str | None, sales_phone: str | None) -> str:
+  em = html.escape((sales_email or "").strip())
+  ph = html.escape((sales_phone or "").strip())
+  base_div = "此致<br/>湃乐多航运科技"
+  if not em:
+    return (
+      "<div style='margin:16px 0 0;font-size:14px;line-height:1.6;color:#111;'>"
+      f"{base_div}</div>"
+    )
+  if ph:
+    contact = f"<br/>联系方式： 邮箱地址：{em}， 联系电话：{ph}"
+  else:
+    contact = f"<br/>联系方式： 邮箱地址：{em}"
+  return (
+    "<div style='margin:16px 0 0;font-size:14px;line-height:1.6;color:#111;'>"
+    f"{base_div}{contact}</div>"
+  )
 
 
 def _normalize_email_for_dedup(raw: str) -> str:
@@ -56,7 +92,7 @@ def _normalize_email_for_dedup(raw: str) -> str:
   s = "".join(c for c in s if unicodedata.category(c) != "Cf")  # 移除格式控制字符（零宽等）
   s = s.lower()
   return s
-SIGNATURE_HTML = "<div style='margin:16px 0 0;font-size:14px;line-height:1.6;color:#111;'>此致<br/>湃乐多航运科技</div>"
+
 
 def _ensure_email_templates_columns(db: Session) -> None:
   """轻量迁移：保证 email_templates 必要列存在（兼容旧 sqlite db）。"""
@@ -73,6 +109,22 @@ def _ensure_email_templates_columns(db: Session) -> None:
         db.execute(sa.text("UPDATE email_templates SET status='enabled' WHERE enabled=1 OR enabled IS NULL"))
         db.execute(sa.text("UPDATE email_templates SET status='disabled' WHERE enabled=0"))
         db.commit()
+    info2 = db.execute(sa.text("PRAGMA table_info(email_templates)")).fetchall()
+    if "fixed_text" not in {row[1] for row in info2}:
+      db.execute(sa.text("ALTER TABLE email_templates ADD COLUMN fixed_text TEXT NULL"))
+      db.commit()
+  except Exception:
+    pass
+
+
+def _ensure_email_records_columns(db: Session) -> None:
+  """轻量迁移：保证 email_records 必要列存在（兼容旧 sqlite db）。"""
+  try:
+    info2 = db.execute(sa.text("PRAGMA table_info(email_records)")).fetchall()
+    cols2 = {row[1] for row in info2}
+    if "fixed_text" not in cols2:
+      db.execute(sa.text("ALTER TABLE email_records ADD COLUMN fixed_text TEXT NULL"))
+      db.commit()
   except Exception:
     pass
 
@@ -445,7 +497,26 @@ def _text_to_html(text: str) -> str:
   return f"<div style='font-size:14px;line-height:1.6;color:#111;'>{safe}</div>"
 
 
-def _build_email_html(content_text: str, inline_images: list[dict]) -> str:
+def _compose_plain_body(ai: str, fixed: str, sig: str) -> str:
+  """纯文本：AI 正文、模版固定文本、落款，段间空行。"""
+  parts: list[str] = []
+  a = (ai or "").rstrip()
+  f = (fixed or "").strip()
+  if a:
+    parts.append(a)
+  if f:
+    parts.append(f)
+  parts.append(sig)
+  return "\n\n".join(parts)
+
+
+def _build_email_html(
+  content_text: str,
+  inline_images: list[dict],
+  sales_email: str | None = None,
+  sales_phone: str | None = None,
+  fixed_text: str | None = None,
+) -> str:
   imgs = ""
   for img in inline_images or []:
     cid = html.escape(img.get("cid") or "")
@@ -456,8 +527,12 @@ def _build_email_html(content_text: str, inline_images: list[dict]) -> str:
       f"<img src=\"cid:{cid}\" style='display:block;border:0;max-width:100%;height:auto;' width='600'/>"
       "</div>"
     )
-  # 排版顺序：文字 -> 图片 -> 落款
-  body = _text_to_html(content_text) + imgs + SIGNATURE_HTML
+  # 排版顺序：AI 正文 -> 固定文本 -> 图片 -> 落款
+  blocks = [_text_to_html(content_text)]
+  fixed_text = "\n" + (fixed_text or "") + "\n"
+  if (fixed_text or "").strip():
+    blocks.append(_text_to_html(fixed_text))
+  body = "".join(blocks) + imgs + _signature_html(sales_email, sales_phone)
   return (
     "<!doctype html><html><body>"
     "<table role='presentation' width='100%' cellpadding='0' cellspacing='0' style='font-family:Arial,Helvetica,sans-serif;'>"
@@ -474,6 +549,9 @@ def _send_smtp_email(
   content: str,
   cc_email: str | None = None,
   inline_images: list[dict] | None = None,
+  sales_email: str | None = None,
+  sales_phone: str | None = None,
+  fixed_text: str | None = None,
 ) -> None:
   global _last_send_global
 
@@ -496,27 +574,43 @@ def _send_smtp_email(
   if cc_email:
     msg["Cc"] = cc_email
   # 纯文本兜底 + HTML 正文（含 CID 内嵌图片）
-  plain = (content or "").rstrip()
-  if plain:
-    plain = f"{plain}\n\n{SIGNATURE_TEXT}"
-  else:
-    plain = SIGNATURE_TEXT
+  sig = _signature_plain(sales_email, sales_phone)
+  plain = _compose_plain_body(content or "", fixed_text or "", sig)
   msg.set_content(plain, subtype="plain", charset="utf-8")
-  html_body = _build_email_html(content or "", inline_images or [])
+  html_body = _build_email_html(
+    content or "",
+    inline_images or [],
+    sales_email,
+    sales_phone,
+    fixed_text,
+  )
   msg.add_alternative(html_body, subtype="html", charset="utf-8")
   if inline_images:
-    html_part = msg.get_payload()[-1]  # text/html part
-    for img in inline_images:
-      cid = img.get("cid")
-      if not cid:
-        continue
-      html_part.add_related(
-        img.get("data") or b"",
-        maintype=img.get("maintype") or "application",
-        subtype=img.get("subtype") or "octet-stream",
-        cid=f"<{cid}>",
-        filename=img.get("filename") or None,
-      )
+    # 通过 walk 精确找到 text/html part，避免依赖 payload 顺序导致 related 绑定不稳定
+    html_part = None
+    # 优先使用标准接口获取 HTML body（更不依赖 payload 顺序）
+    try:
+      html_part = msg.get_body(preferencelist=("html",))
+    except Exception:
+      html_part = None
+    # 兜底：兼容更老的实现/结构
+    if html_part is None:
+      for part in msg.walk():
+        if part.get_content_type() == "text/html":
+          html_part = part
+          break
+    if html_part:
+      for img in inline_images:
+        cid = img.get("cid")
+        if not cid:
+          continue
+        html_part.add_related(
+          img.get("data") or b"",
+          maintype=img.get("maintype") or "application",
+          subtype=img.get("subtype") or "octet-stream",
+          cid=f"<{cid}>",
+          filename=img.get("filename") or None,
+        )
 
   recipients = [to_email]
   if cc_email and cc_email not in recipients:
@@ -574,12 +668,22 @@ def send_test_email(
   inline_images = _build_inline_images_from_image_ids(db, safe_image_ids)
   subject = payload.subject or "邮件预览测试"
   content = payload.content or ""
+  sales_email = _sales_footer_email(current_user) or None
+  sales_phone = (getattr(current_user, "contact_phone", None) or "").strip() or None
   sent_list: list[str] = []
   failed_list: list[tuple[str, str]] = []  # (email, detail)
 
   for to_email in emails:
     try:
-      _send_smtp_email(to_email, subject, content, cc_email=cc_email, inline_images=inline_images)
+      _send_smtp_email(
+        to_email,
+        subject,
+        content,
+        cc_email=cc_email,
+        inline_images=inline_images,
+        sales_email=sales_email,
+        sales_phone=sales_phone,
+      )
       log_email_sent(
         current_user.name, current_user.login,
         to_email, cc_email, settings.smtp_sender or settings.smtp_user,
@@ -671,6 +775,9 @@ def _run_batch_send(
 
     cc_email = _get_cc_email_for_sales(db, user)
     from_email = settings.smtp_sender or settings.smtp_user
+    sales_email = _sales_footer_email(user) or None
+    sales_phone = (getattr(user, "contact_phone", None) or "").strip() or None
+    tpl_fixed_text = ((getattr(tpl, "fixed_text", None) or "").strip()) or None
 
     queued_records = (
       db.query(EmailRecord)
@@ -711,7 +818,16 @@ def _run_batch_send(
           continue
 
       try:
-        _send_smtp_email(to_email, subject, content, cc_email=cc_email, inline_images=inline_images)
+        _send_smtp_email(
+          to_email,
+          subject,
+          content,
+          cc_email=cc_email,
+          inline_images=inline_images,
+          sales_email=sales_email,
+          sales_phone=sales_phone,
+          fixed_text=tpl_fixed_text,
+        )
         log_email_sent(
           user.name, user.login,
           to_email, cc_email, from_email,
@@ -723,9 +839,10 @@ def _run_batch_send(
       except HTTPException as e:
         detail = e.detail if isinstance(e.detail, str) else getattr(e.detail, "message", str(e.detail))
         log_email_failed(user.name, user.login, to_email, detail)
-        rec.status = "sent"
+        rec.status = "failed"
         rec.content = (content or "") + "\n\n[发送失败，详情见服务端日志]"
-        rec.sent_at = datetime.now(timezone.utc)
+        # 失败不应标记已发送时间，否则「邮件记录」会被当作 sent 展示
+        rec.sent_at = None
 
       db.add(rec)
       db.commit()
@@ -787,8 +904,14 @@ def _mark_schedule_failed(schedule_ids: int | list[int]) -> None:
     db.close()
 
 
-def _create_queued_records_for_sales(db: Session, sales_id: int, image_ids: list[int] | None = None) -> int:
+def _create_queued_records_for_sales(
+  db: Session,
+  sales_id: int,
+  image_ids: list[int] | None = None,
+  fixed_text: str | None = None,
+) -> int:
   """为该销售的所有客户创建 status=queued 的 EmailRecord（空 content），返回创建条数。同一邮箱只创建一条。"""
+  _ensure_email_records_columns(db)
   user = db.query(User).filter(User.id == sales_id).first()
   if not user:
     return 0
@@ -817,6 +940,7 @@ def _create_queued_records_for_sales(db: Session, sales_id: int, image_ids: list
       cc_email=cc_email,
       subject="",
       content="",
+      fixed_text=(fixed_text or "").strip() or None,
       image_ids=json.dumps(image_ids or []),
       status="queued",
     )
@@ -832,8 +956,10 @@ def _create_queued_records_from_draft(
   items: list[DraftItem],
   template_name: str,
   image_ids: list[int] | None = None,
+  fixed_text: str | None = None,
 ) -> int:
   """从预生成内容创建 status=queued 的 EmailRecord，content 已填充。"""
+  _ensure_email_records_columns(db)
   user = db.query(User).filter(User.id == sales_id).first()
   if not user:
     return 0
@@ -855,6 +981,7 @@ def _create_queued_records_from_draft(
       cc_email=cc_email,
       subject=template_name or "营销邮件",
       content=it.content or "",
+      fixed_text=(fixed_text or "").strip() or None,
       image_ids=json.dumps(image_ids or []),
       status="queued",
     )
@@ -887,6 +1014,7 @@ def start_batch_send(
   except Exception:
     tpl_image_ids = []
   tpl_name = (tpl.name or "").strip() or "营销邮件"
+  tpl_fixed_text = ((getattr(tpl, "fixed_text", None) or "").strip()) or None
   validated_items, draft_err = _resolve_validated_draft_items(
     db, current_user.id, payload.items
   )
@@ -896,7 +1024,12 @@ def start_batch_send(
       detail=draft_err or "草稿校验失败",
     )
   n = _create_queued_records_from_draft(
-    db, current_user.id, validated_items, tpl_name, tpl_image_ids
+    db,
+    current_user.id,
+    validated_items,
+    tpl_name,
+    tpl_image_ids,
+    fixed_text=tpl_fixed_text,
   )
   _global_pending_emails += n
   _, img_names = _resolve_template_and_image_names(db, payload.template_id, tpl_image_ids)
@@ -1218,6 +1351,10 @@ def check_and_run_schedules() -> None:
           items = [DraftItem(**x) for x in items_data]
           tpl = db.query(EmailTemplate).filter(EmailTemplate.id == template_id).first()
           tpl_name = (tpl.name or "").strip() if tpl else "营销邮件"
+          if tpl:
+            tpl_fixed_text = ((getattr(tpl, "fixed_text", None) or "").strip()) or None
+          else:
+            tpl_fixed_text = None
           resolved, derr = _resolve_validated_draft_items(db, sales_id, items)
           if derr or not resolved:
             for r in group:
@@ -1229,7 +1366,12 @@ def check_and_run_schedules() -> None:
             log_schedule_failed(schedule_ids, derr or "draft_items 归属/邮箱校验失败")
             continue
           n = _create_queued_records_from_draft(
-            db, sales_id, resolved, tpl_name, image_ids or []
+            db,
+            sales_id,
+            resolved,
+            tpl_name,
+            image_ids or [],
+            fixed_text=tpl_fixed_text,
           )
         except Exception as e:
           for r in group:
@@ -1241,7 +1383,16 @@ def check_and_run_schedules() -> None:
           log_schedule_failed(schedule_ids, f"draft_items 解析或校验异常: {e}")
           continue
       else:
-        n = _create_queued_records_for_sales(db, sales_id, image_ids or [])
+        tpl = db.query(EmailTemplate).filter(EmailTemplate.id == template_id).first()
+        tpl_fixed_text = None
+        if tpl:
+          tpl_fixed_text = ((getattr(tpl, "fixed_text", None) or "").strip()) or None
+        n = _create_queued_records_for_sales(
+          db,
+          sales_id,
+          image_ids or [],
+          fixed_text=tpl_fixed_text,
+        )
       total_queued += n
       _global_pending_emails += n
       for r in group:

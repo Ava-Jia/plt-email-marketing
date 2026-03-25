@@ -3,6 +3,7 @@ from datetime import datetime, timezone, timedelta
 import json
 
 from fastapi import APIRouter, Depends, HTTPException, status
+import sqlalchemy as sa
 from sqlalchemy import or_
 from sqlalchemy.orm import Session
 
@@ -13,6 +14,18 @@ from app.services.app_logger import log_queued_cancelled
 
 router = APIRouter(prefix="/records", tags=["records"])
 BEIJING = timezone(timedelta(hours=8))
+
+
+def _ensure_email_records_columns(db: Session) -> None:
+    """轻量迁移：保证 email_records 必要列存在（兼容旧 sqlite db）。"""
+    try:
+        info = db.execute(sa.text("PRAGMA table_info(email_records)")).fetchall()
+        cols = {row[1] for row in info}
+        if "fixed_text" not in cols:
+            db.execute(sa.text("ALTER TABLE email_records ADD COLUMN fixed_text TEXT NULL"))
+            db.commit()
+    except Exception:
+        pass
 
 
 def _to_beijing_iso(dt: datetime | None) -> str | None:
@@ -43,7 +56,7 @@ def get_record_filters(
     """返回各列的可选筛选值（去重），供前端下拉框使用。"""
     base = _base_query(db, current_user)
 
-    statuses = ["queued", "sent", "expired"]
+    statuses = ["queued", "sent", "failed", "expired"]
     to_emails = sorted(
         x[0] for x in base.with_entities(EmailRecord.to_email).distinct().all() if x[0]
     )
@@ -92,6 +105,7 @@ def list_records(
     sent_date_to: str | None = None,
 ):
     """当前用户（销售：仅本人；管理员：全部）的邮件记录列表，支持多列筛选。"""
+    _ensure_email_records_columns(db)
     if page < 1:
         page = 1
     if page_size < 1 or page_size > 100:
@@ -106,6 +120,7 @@ def list_records(
                 EmailRecord.to_email.ilike(pattern),
                 EmailRecord.subject.ilike(pattern),
                 EmailRecord.content.ilike(pattern),
+                EmailRecord.fixed_text.ilike(pattern),
             )
         )
 
@@ -228,6 +243,7 @@ def list_records(
                 "cc_email": rec.cc_email,
                 "subject": rec.subject or "",
                 "content": rec.content,
+                "fixed_text": rec.fixed_text or "",
                 "image_names": image_names,
                 "status": display_status,
                 "created_at": rec.created_at.isoformat() if isinstance(rec.created_at, datetime) else None,

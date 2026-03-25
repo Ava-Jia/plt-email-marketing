@@ -16,7 +16,14 @@ router = APIRouter(prefix="/admin/sales", tags=["admin-sales"])
 def _serialize(u: User) -> dict:
     email = (u.cc_email or u.login or "").strip()
     pwd = getattr(u, "password_plain", None)
-    return {"id": u.id, "email": email, "role": u.role, "password": pwd or ""}
+    phone = getattr(u, "contact_phone", None) or ""
+    return {
+        "id": u.id,
+        "email": email,
+        "role": u.role,
+        "password": pwd or "",
+        "contact_phone": phone.strip() if isinstance(phone, str) else "",
+    }
 
 
 @router.get("", response_model=list[SalesUserRead])
@@ -41,6 +48,7 @@ def create_sales(
     ).first()
     if existing:
         raise HTTPException(status_code=400, detail="该用户/邮箱已被使用")
+    phone = (data.contact_phone or "").strip() or None
     user = User(
         name=data.email[:128],
         login=data.email,
@@ -48,6 +56,7 @@ def create_sales(
         role=UserRole.sales.value,
         cc_email=data.email,
         password_plain=data.password,
+        contact_phone=phone,
     )
     db.add(user)
     db.commit()
@@ -79,6 +88,8 @@ def update_sales(
     if data.password is not None and data.password.strip():
         row.password_hash = hash_password(data.password)
         row.password_plain = data.password
+    if "contact_phone" in data.model_fields_set:
+        row.contact_phone = (data.contact_phone or "").strip() or None
     db.commit()
     db.refresh(row)
     return _serialize(row)

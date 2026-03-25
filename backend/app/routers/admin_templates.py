@@ -35,6 +35,10 @@ def _ensure_email_templates_columns(db: Session) -> None:
             else:
                 db.execute(sa.text("UPDATE email_templates SET status='enabled'"))
             db.commit()
+        info2 = db.execute(sa.text("PRAGMA table_info(email_templates)")).fetchall()
+        if "fixed_text" not in {row[1] for row in info2}:
+            db.execute(sa.text("ALTER TABLE email_templates ADD COLUMN fixed_text TEXT NULL"))
+            db.commit()
     except Exception:
         pass
 
@@ -60,7 +64,15 @@ def _serialize(row: EmailTemplate) -> dict:
     s = getattr(row, "status", None) or STATUS_PENDING
     if s not in (STATUS_PENDING, STATUS_ENABLED, STATUS_DISABLED):
         s = STATUS_PENDING
-    return {"id": row.id, "name": row.name, "content": row.content, "image_ids": image_ids, "status": s}
+    ft = getattr(row, "fixed_text", None) or ""
+    return {
+        "id": row.id,
+        "name": row.name,
+        "content": row.content,
+        "fixed_text": ft if isinstance(ft, str) else "",
+        "image_ids": image_ids,
+        "status": s,
+    }
 
 
 @router.get("", response_model=list[EmailTemplateRead])
@@ -89,6 +101,7 @@ def create_template(
     row = EmailTemplate(
         name=name,
         content=data.content,
+        fixed_text=(data.fixed_text or "").strip() or None,
         image_ids=_parse_ids(getattr(data, "image_ids", None)),
         status=STATUS_PENDING,
     )
@@ -123,6 +136,8 @@ def update_template(
         row.name = name
     if data.content is not None:
         row.content = data.content
+    if data.fixed_text is not None:
+        row.fixed_text = (data.fixed_text or "").strip() or None
     if getattr(data, "image_ids", None) is not None:
         row.image_ids = _parse_ids(getattr(data, "image_ids", None))
     db.commit()

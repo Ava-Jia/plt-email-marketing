@@ -19,7 +19,7 @@ function AdminSalesUsers() {
   const [loading, setLoading] = useState(true)
   const [message, setMessage] = useState('')
   const [editing, setEditing] = useState(null)
-  const [form, setForm] = useState({ email: '', password: '' })
+  const [form, setForm] = useState({ email: '', password: '', contact_phone: '' })
 
   const fetchData = () => {
     setLoading(true)
@@ -39,7 +39,7 @@ function AdminSalesUsers() {
 
   const resetForm = () => {
     setEditing(null)
-    setForm({ email: '', password: '' })
+    setForm({ email: '', password: '', contact_phone: '' })
   }
 
   const handleEdit = (row) => {
@@ -47,6 +47,7 @@ function AdminSalesUsers() {
     setForm({
       email: row.email || '',
       password: '',
+      contact_phone: row.contact_phone || '',
     })
   }
 
@@ -61,7 +62,7 @@ function AdminSalesUsers() {
       return
     }
     if (editing) {
-      const body = { email }
+      const body = { email, contact_phone: form.contact_phone.trim() }
       if (password) body.password = password
       api.put(`/admin/sales/${editing.id}`, body)
         .then(() => { resetForm(); fetchData() })
@@ -74,7 +75,11 @@ function AdminSalesUsers() {
         setMessage('新建时请填写密码')
         return
       }
-      api.post('/admin/sales', { email, password })
+      api.post('/admin/sales', {
+        email,
+        password,
+        contact_phone: form.contact_phone.trim() || null,
+      })
         .then(() => { resetForm(); fetchData() })
         .catch((err) => {
           const d = err.response?.data?.detail
@@ -98,7 +103,7 @@ function AdminSalesUsers() {
     <section className="section admin-block">
       <h2 className="section-title">销售用户管理</h2>
       <p className="text-muted text-sm mb-4">
-        管理员在此创建销售账号。用户/邮箱 即登录账号，同时也是发件时被 CC 的邮箱。
+        管理员在此创建销售账号。用户/邮箱 即登录账号，同时也是发件时被 CC 的邮箱。邮件落款会显示「联系方式： 邮箱地址：…」有电话时再带「联系电话：…」。
       </p>
 
       <form onSubmit={handleSubmit} className="mb-4" style={{ maxWidth: 600 }}>
@@ -111,6 +116,17 @@ function AdminSalesUsers() {
             onChange={(e) => setForm((f) => ({ ...f, email: e.target.value }))}
             placeholder="name@pltplt.com"
             required
+          />
+        </div>
+        <div className="form-group">
+          <label className="form-label">联系方式（电话）</label>
+          <input
+            type="text"
+            className="input input-width-md"
+            value={form.contact_phone}
+            onChange={(e) => setForm((f) => ({ ...f, contact_phone: e.target.value }))}
+            placeholder="选填，显示在邮件落款"
+            maxLength={64}
           />
         </div>
         <div className="form-group">
@@ -138,11 +154,12 @@ function AdminSalesUsers() {
       ) : rows.length === 0 ? (
         <p className="text-muted">当前暂无销售用户，请在上方新增。</p>
       ) : (
-        <div className="table-wrap" style={{ maxWidth: 720 }}>
+        <div className="table-wrap" style={{ maxWidth: 880 }}>
           <table className="table">
             <thead>
               <tr>
                 <th>用户/邮箱</th>
+                <th>联系方式</th>
                 <th>密码</th>
                 <th className="text-right">操作</th>
               </tr>
@@ -151,6 +168,7 @@ function AdminSalesUsers() {
               {rows.map((row) => (
                 <tr key={row.id}>
                   <td>{row.email || '—'}</td>
+                  <td>{row.contact_phone || '—'}</td>
                   <td>{row.password || '—'}</td>
                   <td className="text-right">
                     <button type="button" className="btn" onClick={() => handleEdit(row)} style={{ marginRight: 8 }}>编辑</button>
@@ -174,7 +192,7 @@ function AdminTemplates() {
   const [imageError, setImageError] = useState('')
   const [showImages, setShowImages] = useState(false) // 默认不展示图片区块；编辑或上传后展示
   const [editing, setEditing] = useState(null)
-  const [form, setForm] = useState({ name: '', content: '', image_ids: [] })
+  const [form, setForm] = useState({ name: '', content: '', fixed_text: '', image_ids: [] })
   const [error, setError] = useState('')
   const [page, setPage] = useState(1)
   const pageSize = 10
@@ -215,12 +233,13 @@ function AdminTemplates() {
     const body = {
       name,
       content: form.content.trim(),
+      fixed_text: form.fixed_text.trim(),
       image_ids: Array.isArray(form.image_ids) && form.image_ids.length ? form.image_ids : null,
     }
     if (editing) {
       api
         .put(`/admin/templates/${editing.id}`, body)
-        .then(() => { setEditing(null); setShowImages(false); setForm({ name: '', content: '', image_ids: [] }); fetchList(); })
+        .then(() => { setEditing(null); setShowImages(false); setForm({ name: '', content: '', fixed_text: '', image_ids: [] }); fetchList(); })
         .catch((err) => {
           const d = err.response?.data?.detail
           setError(typeof d === 'string' ? d : d?.message || err.message || '保存失败')
@@ -228,7 +247,7 @@ function AdminTemplates() {
     } else {
       api
         .post('/admin/templates', body)
-        .then(() => { setShowImages(false); setForm({ name: '', content: '', image_ids: [] }); fetchList(); })
+        .then(() => { setShowImages(false); setForm({ name: '', content: '', fixed_text: '', image_ids: [] }); fetchList(); })
         .catch((err) => {
           const d = err.response?.data?.detail
           setError(typeof d === 'string' ? d : d?.message || err.message || '新增失败')
@@ -239,7 +258,12 @@ function AdminTemplates() {
   const handleEdit = (t) => {
     setEditing(t)
     setShowImages(true)
-    setForm({ name: t.name, content: t.content, image_ids: Array.isArray(t.image_ids) ? t.image_ids : [] })
+    setForm({
+      name: t.name,
+      content: t.content,
+      fixed_text: t.fixed_text || '',
+      image_ids: Array.isArray(t.image_ids) ? t.image_ids : [],
+    })
   }
 
   const handleDelete = (id) => {
@@ -280,7 +304,7 @@ function AdminTemplates() {
   const handleCancel = () => {
     setEditing(null)
     setShowImages(false)
-    setForm({ name: '', content: '', image_ids: [] })
+    setForm({ name: '', content: '', fixed_text: '', image_ids: [] })
     setError('')
   }
 
@@ -351,7 +375,7 @@ function AdminTemplates() {
     <section className="section admin-block">
       <h2 className="section-title">邮件模版管理</h2>
       <p className="text-muted text-sm mb-4">
-        每条记录是一套邮件模版：标题（唯一）+ 文字模版 + 图片物料。管理员创建模版后需通过「发布」和「禁用」管理模版状态。
+        每条记录是一套邮件模版：标题（唯一）+ 文字模版 + 固定文本 + 图片物料。管理员创建模版后需通过「发布」和「禁用」管理模版状态。
       </p>
 
       <form onSubmit={handleSubmit} className="mb-4">
@@ -373,6 +397,17 @@ function AdminTemplates() {
             onChange={(e) => setForm((f) => ({ ...f, content: e.target.value }))}
             placeholder="邮件文字模版（用于 AI 生成邮件内容）……"
             rows={4}
+            style={{ maxWidth: 480 }}
+          />
+        </div>
+        <div className="form-group">
+          <label className="form-label">固定文本</label>
+          <textarea
+            className="textarea"
+            value={form.fixed_text}
+            onChange={(e) => setForm((f) => ({ ...f, fixed_text: e.target.value }))}
+            placeholder="发信时在 AI 生成内容与内嵌图片之间……"
+            rows={3}
             style={{ maxWidth: 480 }}
           />
         </div>
@@ -465,11 +500,12 @@ function AdminTemplates() {
         <p className="text-muted">暂无模版，请在上方新增。</p>
       ) : (
         <div className="table-wrap" style={{ maxWidth: 900 }}>
-          <table className="table" style={{ minWidth: 720 }}>
+          <table className="table" style={{ minWidth: 880 }}>
             <thead>
               <tr>
                 <th>标题</th>
                 <th>内容摘要</th>
+                <th>固定文本</th>
                 <th>图片</th>
                 <th>状态</th>
                 <th style={{ width: 200, textAlign: 'right' }}>操作</th>
@@ -479,7 +515,10 @@ function AdminTemplates() {
               {pageItems.map((t) => (
                 <tr key={t.id}>
                   <td>{t.name}</td>
-                  <td className="cell-ellipsis" style={{ maxWidth: 360 }}>{t.content?.slice(0, 60)}…</td>
+                  <td className="cell-ellipsis" style={{ maxWidth: 220 }} title={t.content || ''}>{t.content?.slice(0, 60)}{t.content && t.content.length > 60 ? '…' : ''}</td>
+                  <td className="cell-ellipsis text-muted" style={{ maxWidth: 160 }} title={t.fixed_text || ''}>
+                    {(t.fixed_text || '').trim() ? `${(t.fixed_text || '').trim().slice(0, 40)}${(t.fixed_text || '').trim().length > 40 ? '…' : ''}` : '—'}
+                  </td>
                   <td className="text-muted">{Array.isArray(t.image_ids) ? `${t.image_ids.length} 张` : '0 张'}</td>
                   <td>
                     <span className={(t.status || 'pending') === 'enabled' ? 'text-success' : 'text-muted'}>

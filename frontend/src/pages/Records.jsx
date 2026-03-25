@@ -2,7 +2,7 @@ import { useState, useEffect } from 'react'
 import HoverFullText from '../components/HoverFullText'
 import { api } from '../api/client'
 
-const STATUS_LABELS = { queued: '排队中', sent: '已发送', expired: '排队超时' }
+const STATUS_LABELS = { queued: '排队中', sent: '已发送', failed: '发送失败', expired: '排队超时' }
 
 export default function Records() {
   const [pageSize, setPageSize] = useState(10)
@@ -343,7 +343,7 @@ export default function Records() {
                   <th style={{ width: 220 }}>To（客户邮箱）</th>
                   <th style={{ width: 200 }}>From</th>
                   <th style={{ width: 220 }}>CC</th>
-                  <th>主题 / 内容摘要</th>
+                  <th>内容摘要</th>
                   <th className="text-right" style={{ width: 140 }}>操作</th>
                 </tr>
               </thead>
@@ -355,14 +355,14 @@ export default function Records() {
                       : '—'
                   const imageCount = Array.isArray(row.image_names) ? row.image_names.length : 0
                   const imageBadge = imageCount > 0 ? `（含 ${imageCount} 张图片）` : ''
-                  const summary = `${row.subject || ''} ${imageBadge} ${row.content || ''}`.trim()
+                  const summary = `${row.subject || ''} ${imageBadge} ${row.fixed_text || ''} ${row.content || ''}`.trim()
                   const short =
                     summary.length > 60 ? `${summary.slice(0, 60)}…` : summary || '（无内容）'
                   const imageLine =
                     Array.isArray(row.image_names) && row.image_names.length
                       ? `附件图片：${row.image_names.join('、')}`
                       : '附件图片：无'
-                  const detailFull = `主题：${row.subject || '（无主题）'}\n\n${row.content || '（无内容）'}\n\n${imageLine}`
+                  const detailFull = `主题：${row.subject || '（无主题）'}\n${row.content || '（无内容）'}\n\n${row.fixed_text || '（无固定文本）'}\n\n${imageLine}`
 
                   return (
                     <tr key={row.id}>
@@ -376,7 +376,17 @@ export default function Records() {
                         )}
                       </td>
                       <td>
-                        <span className={`badge badge-${row.status === 'sent' ? 'sent' : row.status === 'expired' ? 'expired' : 'queued'}`}>
+                        <span
+                          className={`badge badge-${
+                            row.status === 'sent'
+                              ? 'sent'
+                              : row.status === 'expired'
+                                ? 'expired'
+                                : row.status === 'failed'
+                                  ? 'cancelled'
+                                  : 'queued'
+                          }`}
+                        >
                           {STATUS_LABELS[row.status] ?? row.status}
                         </span>
                       </td>
@@ -391,6 +401,9 @@ export default function Records() {
                           ) : (
                             <div className="expand-content">
                               <div style={{ fontWeight: 500, marginBottom: 4 }}>{row.subject || '（无主题）'}</div>
+                              <div className="text-muted text-sm" style={{ marginBottom: 6 }}>
+                                固定文本：{row.fixed_text || '（无固定文本）'}
+                              </div>
                               <div>{row.content || '（无内容）'}</div>
                               <div className="text-muted text-sm mt-2">
                                 附件：{Array.isArray(row.image_names) && row.image_names.length ? row.image_names.join('、') : '无'}
