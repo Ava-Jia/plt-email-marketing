@@ -506,9 +506,10 @@ def _build_inline_images_from_image_ids(
   return out
 
 
-def _text_to_html(text: str) -> str:
+def _text_to_html(text: str, *, bold: bool = False) -> str:
   safe = html.escape(text or "").replace("\n", "<br/>")
-  return f"<div style='font-size:14px;line-height:1.6;color:#111;'>{safe}</div>"
+  fw = "font-weight:700;" if bold else ""
+  return f"<div style='font-size:14px;line-height:1.6;color:#111;{fw}'>{safe}</div>"
 
 
 def _compose_plain_body(ai: str, fixed: str | None, sig: str) -> str:
@@ -547,7 +548,7 @@ def _build_email_html(
   if ft:
     blocks.append(
       "<div style='margin:20px 0;'>"
-      f"{_text_to_html(ft)}"
+      f"{_text_to_html(ft, bold=True)}"
       "</div>"
     )
   body = "".join(blocks) + imgs + _signature_html(sales_sign_name, sales_phone)
