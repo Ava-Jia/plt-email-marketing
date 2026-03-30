@@ -2,7 +2,9 @@
 import unicodedata
 from datetime import datetime, timedelta, timezone
 from email.message import EmailMessage
+from email.policy import SMTP as SMTP_POLICY
 from email.utils import formatdate, make_msgid
+import secrets
 import html
 from pathlib import Path
 import json
@@ -475,7 +477,8 @@ def _build_inline_images_from_image_ids(
         filename = full_path.name
     if maintype == "image" and subtype == "png":
       filename = str(Path(filename).with_suffix(".png"))
-    cid = make_msgid()[1:-1]  # 去掉尖括号，HTML 中用 cid:xxx
+    # 仅用 [0-9a-f]@inline，避免 make_msgid 依赖服务器 FQDN；与 HTML cid:、Content-ID 尖括号内值严格一致
+    cid = f"{secrets.token_hex(16)}@inline"
     out.append({"cid": cid, "maintype": maintype, "subtype": subtype, "data": data, "filename": filename})
   return out
 
@@ -508,7 +511,8 @@ def _build_email_html(
 ) -> str:
   imgs = ""
   for img in inline_images or []:
-    cid = html.escape(img.get("cid") or "")
+    cid = (img.get("cid") or "").strip()
+    # 禁止对 cid 做 html.escape：若含 & 等会与 Content-ID 头不一致，部分客户端（如 Foxmail）不显示内嵌
     if not cid:
       continue
     imgs += (
@@ -557,7 +561,8 @@ def _send_smtp_email(
         time.sleep(RATE_LIMIT_SECONDS - delta)
     _last_send_global = datetime.now(timezone.utc)
 
-  msg = EmailMessage()
+  # SMTP 策略：CRLF、行长，降低经中继/网关重编码后 multipart 边界损坏（Foxmail 等对结构更敏感）
+  msg = EmailMessage(policy=SMTP_POLICY)
   msg["Subject"] = subject or "邮件预览测试"
   msg["From"] = settings.smtp_sender or settings.smtp_user
   msg["To"] = to_email
