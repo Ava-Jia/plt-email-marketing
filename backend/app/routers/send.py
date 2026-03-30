@@ -483,6 +483,23 @@ def _build_inline_images_from_image_ids(
   return out
 
 
+def _image_ids_for_email_record(rec: EmailRecord, fallback: list[int]) -> list[int]:
+  """
+  排队记录创建时已写入当时模版的 image_ids。多批群发合并进同一发送循环时，必须按记录发图，
+  不能沿用单次 _run_batch_send 传入的 fallback（否则多批会共用最后一批的图片）。
+  """
+  raw = getattr(rec, "image_ids", None)
+  if raw is None or (isinstance(raw, str) and not str(raw).strip()):
+    return list(fallback or [])
+  try:
+    parsed = json.loads(raw)
+    if isinstance(parsed, list):
+      return [int(x) for x in parsed]
+  except (TypeError, ValueError, json.JSONDecodeError):
+    pass
+  return list(fallback or [])
+
+
 def _text_to_html(text: str, *, bold: bool = False) -> str:
   safe = html.escape(text or "").replace("\n", "<br/>")
   fw = "font-weight:700;" if bold else ""
@@ -729,7 +746,8 @@ def _run_batch_send(
   schedule_ids: int | list[int] | None = None,
   custom_subject: str | None = None,
 ) -> None:
-  """后台任务：对当前销售的全部客户依次发送邮件，每封间隔 30 秒（全局限速共享），可携带图片附件。
+  """后台任务：对当前销售的全部 queued 记录依次发送，每封间隔 30 秒（全局限速共享）。
+  内嵌图按每条 EmailRecord.image_ids 生成，避免多批群发合并队列时共用同一套图。
   custom_subject：若传入则作为邮件主题前缀（每封为 custom_subject - 客户名），否则用模版名。"""
   global _global_pending_emails
   db = SessionLocal()
@@ -769,7 +787,7 @@ def _run_batch_send(
         effective_image_ids = json.loads(getattr(tpl, "image_ids", None) or "[]")
       except Exception:
         effective_image_ids = []
-    inline_images = _build_inline_images_from_image_ids(db, effective_image_ids or [])
+    fallback_image_ids = effective_image_ids or []
 
     cc_email = _get_cc_email_for_sales(db, user)
     from_email = settings.smtp_sender or settings.smtp_user
@@ -816,6 +834,8 @@ def _run_batch_send(
           continue
 
       eff_fixed = ((rec.fixed_text or "").strip()) or tpl_fixed_text
+      per_rec_ids = _image_ids_for_email_record(rec, fallback_image_ids)
+      inline_images = _build_inline_images_from_image_ids(db, per_rec_ids)
       try:
         _send_smtp_email(
           to_email,
