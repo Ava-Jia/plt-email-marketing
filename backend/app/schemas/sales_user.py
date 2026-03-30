@@ -5,6 +5,18 @@ from pydantic import BaseModel, field_validator
 EMAIL_RE = re.compile(r"^[^\s@]+@[^\s@]+\.[^\s@]+$")
 
 _MAX_PHONE_LEN = 64
+_MAX_SIGN_NAME_LEN = 30
+
+
+def _normalize_sign_name(v: str | None) -> str | None:
+    if v is None:
+        return None
+    s = (v or "").strip()
+    if not s:
+        return None
+    if len(s) > _MAX_SIGN_NAME_LEN:
+        raise ValueError(f"用户姓名最多 {_MAX_SIGN_NAME_LEN} 个字符")
+    return s
 
 
 def _normalize_phone(v: str | None) -> str | None:
@@ -19,10 +31,16 @@ def _normalize_phone(v: str | None) -> str | None:
 
 
 class SalesUserCreate(BaseModel):
-    """新建销售：用户/邮箱、密码。邮箱用于登录，同时是发件时被 CC 的邮箱。"""
+    """新建销售：用户姓名（落款）、邮箱、密码。邮箱用于登录，同时是发件时被 CC 的邮箱。"""
     email: str
     password: str
+    sign_name: str | None = None
     contact_phone: str | None = None
+
+    @field_validator("sign_name")
+    @classmethod
+    def sign_name_ok(cls, v: str | None) -> str | None:
+        return _normalize_sign_name(v)
 
     @field_validator("email")
     @classmethod
@@ -57,10 +75,18 @@ class SalesUserCreate(BaseModel):
 
 
 class SalesUserUpdate(BaseModel):
-    """编辑销售：用户/邮箱、密码(可选)、联系方式(可选，传空字符串可清空)。"""
+    """编辑销售：用户姓名、邮箱、密码(可选)、联系方式(可选，传空字符串可清空)。"""
     email: str | None = None
     password: str | None = None
+    sign_name: str | None = None
     contact_phone: str | None = None
+
+    @field_validator("sign_name")
+    @classmethod
+    def sign_name_ok(cls, v: str | None) -> str | None:
+        if v is None:
+            return None
+        return _normalize_sign_name(v)
 
     @field_validator("email")
     @classmethod
@@ -100,9 +126,10 @@ class SalesUserUpdate(BaseModel):
 
 class SalesUserRead(BaseModel):
     id: int
-    email: str  # 用户/邮箱，用于登录及 CC
+    email: str  # 邮箱，用于登录及 CC
     role: str
     password: str = ""  # 明文密码，管理员可见
+    sign_name: str = ""  # 落款姓名
     contact_phone: str = ""
 
     class Config:

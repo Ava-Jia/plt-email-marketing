@@ -44,42 +44,55 @@ router = APIRouter(prefix="/send", tags=["send"])
 MAX_TEST_TO_EMAILS = 15
 
 
-def _sales_footer_email(user: User) -> str:
-  """落款用的销售邮箱展示：优先 cc_email，否则 login。"""
-  return ((user.cc_email or user.login or "").strip()) or ""
+def _footer_display_name(sign_name: str | None) -> str:
+  """落款首行：销售配置的姓名，空则用默认公司名。"""
+  s = (sign_name or "").strip()[:30]
+  return s if s else "湃乐多航运科技"
 
 
-def _signature_plain(sales_email: str | None, sales_phone: str | None) -> str:
-  """此致 + 公司名；若有邮箱则追加「联系方式： 邮箱地址：…」有电话时再带「联系电话」。"""
-  base = "此致\n湃乐多航运科技"
-  em = (sales_email or "").strip()
+def _signature_plain(
+  sales_sign_name: str | None,
+  sales_phone: str | None,
+  fixed_text: str | None = None,
+) -> str:
+  """落款：姓名行、联系方式（可选）、固定文本（最后一行，可选）。"""
+  lines: list[str] = [_footer_display_name(sales_sign_name)]
   ph = (sales_phone or "").strip()
-  if not em:
-    return base
   if ph:
-    contact = f"联系方式： 邮箱地址：{em}， 联系电话：{ph}"
-  else:
-    contact = f"联系方式： 邮箱地址：{em}"
-  return f"{base}\n{contact}"
+    lines.append(f"{ph}")
+  ft = (fixed_text or "").strip()
+  if ft:
+    lines.append(ft)
+  return "\n".join(lines)
 
 
-def _signature_html(sales_email: str | None, sales_phone: str | None) -> str:
-  em = html.escape((sales_email or "").strip())
+def _signature_html(
+  sales_sign_name: str | None,
+  sales_phone: str | None,
+  fixed_text: str | None = None,
+) -> str:
+  n = html.escape(_footer_display_name(sales_sign_name))
   ph = html.escape((sales_phone or "").strip())
-  base_div = "此致<br/>湃乐多航运科技"
-  if not em:
-    return (
-      "<div style='margin:16px 0 0;font-size:14px;line-height:1.6;color:#111;'>"
-      f"{base_div}</div>"
-    )
-  if ph:
-    contact = f"<br/>联系方式： 邮箱地址：{em}， 联系电话：{ph}"
-  else:
-    contact = f"<br/>联系方式： 邮箱地址：{em}"
-  return (
+  block = (
     "<div style='margin:16px 0 0;font-size:14px;line-height:1.6;color:#111;'>"
-    f"{base_div}{contact}</div>"
+    f"{n}"
+    "</div>"
   )
+  if ph:
+    block += (
+      "<div style='margin:4px 0 0;font-size:14px;line-height:1.6;color:#111;'>"
+      f"{ph}"
+      "</div>"
+    )
+  ft = (fixed_text or "").strip()
+  if ft:
+    fsafe = html.escape(ft).replace("\n", "<br/>")
+    block += (
+      "<div style='margin:8px 0 0;font-size:14px;line-height:1.6;color:#111;'>"
+      f"{fsafe}"
+      "</div>"
+    )
+  return block
 
 
 def _normalize_email_for_dedup(raw: str) -> str:
@@ -497,15 +510,12 @@ def _text_to_html(text: str) -> str:
   return f"<div style='font-size:14px;line-height:1.6;color:#111;'>{safe}</div>"
 
 
-def _compose_plain_body(ai: str, fixed: str, sig: str) -> str:
-  """纯文本：AI 正文、模版固定文本、落款，段间空行。"""
+def _compose_plain_body(ai: str, sig: str) -> str:
+  """纯文本：AI 正文与落款（落款末行为固定文本），段间空行。"""
   parts: list[str] = []
   a = (ai or "").rstrip()
-  f = (fixed or "").strip()
   if a:
     parts.append(a)
-  if f:
-    parts.append(f)
   parts.append(sig)
   return "\n\n".join(parts)
 
@@ -513,7 +523,7 @@ def _compose_plain_body(ai: str, fixed: str, sig: str) -> str:
 def _build_email_html(
   content_text: str,
   inline_images: list[dict],
-  sales_email: str | None = None,
+  sales_sign_name: str | None = None,
   sales_phone: str | None = None,
   fixed_text: str | None = None,
 ) -> str:
@@ -527,12 +537,10 @@ def _build_email_html(
       f"<img src=\"cid:{cid}\" style='display:block;border:0;max-width:100%;height:auto;' width='600'/>"
       "</div>"
     )
-  # 排版顺序：AI 正文 -> 固定文本 -> 图片 -> 落款
-  blocks = [_text_to_html(content_text)]
-  fixed_text = "\n" + (fixed_text or "") + "\n"
-  if (fixed_text or "").strip():
-    blocks.append(_text_to_html(fixed_text))
-  body = "".join(blocks) + imgs + _signature_html(sales_email, sales_phone)
+  # 排版顺序：AI 正文 -> 图片 -> 落款（落款末行为固定文本）
+  body = _text_to_html(content_text) + imgs + _signature_html(
+    sales_sign_name, sales_phone, fixed_text
+  )
   return (
     "<!doctype html><html><body>"
     "<table role='presentation' width='100%' cellpadding='0' cellspacing='0' style='font-family:Arial,Helvetica,sans-serif;'>"
@@ -549,7 +557,7 @@ def _send_smtp_email(
   content: str,
   cc_email: str | None = None,
   inline_images: list[dict] | None = None,
-  sales_email: str | None = None,
+  sales_sign_name: str | None = None,
   sales_phone: str | None = None,
   fixed_text: str | None = None,
 ) -> None:
@@ -574,13 +582,13 @@ def _send_smtp_email(
   if cc_email:
     msg["Cc"] = cc_email
   # 纯文本兜底 + HTML 正文（含 CID 内嵌图片）
-  sig = _signature_plain(sales_email, sales_phone)
-  plain = _compose_plain_body(content or "", fixed_text or "", sig)
+  sig = _signature_plain(sales_sign_name, sales_phone, fixed_text)
+  plain = _compose_plain_body(content or "", sig)
   msg.set_content(plain, subtype="plain", charset="utf-8")
   html_body = _build_email_html(
     content or "",
     inline_images or [],
-    sales_email,
+    sales_sign_name,
     sales_phone,
     fixed_text,
   )
@@ -668,7 +676,7 @@ def send_test_email(
   inline_images = _build_inline_images_from_image_ids(db, safe_image_ids)
   subject = payload.subject or "邮件预览测试"
   content = payload.content or ""
-  sales_email = _sales_footer_email(current_user) or None
+  sales_sign_name = (getattr(current_user, "sign_name", None) or "").strip()[:30] or None
   sales_phone = (getattr(current_user, "contact_phone", None) or "").strip() or None
   sent_list: list[str] = []
   failed_list: list[tuple[str, str]] = []  # (email, detail)
@@ -681,7 +689,7 @@ def send_test_email(
         content,
         cc_email=cc_email,
         inline_images=inline_images,
-        sales_email=sales_email,
+        sales_sign_name=sales_sign_name,
         sales_phone=sales_phone,
       )
       log_email_sent(
@@ -775,7 +783,7 @@ def _run_batch_send(
 
     cc_email = _get_cc_email_for_sales(db, user)
     from_email = settings.smtp_sender or settings.smtp_user
-    sales_email = _sales_footer_email(user) or None
+    sales_sign_name = (getattr(user, "sign_name", None) or "").strip()[:30] or None
     sales_phone = (getattr(user, "contact_phone", None) or "").strip() or None
     tpl_fixed_text = ((getattr(tpl, "fixed_text", None) or "").strip()) or None
 
@@ -817,6 +825,7 @@ def _run_batch_send(
           log_batch_skip_no_record(to_email, user.login or "")
           continue
 
+      eff_fixed = ((rec.fixed_text or "").strip()) or tpl_fixed_text
       try:
         _send_smtp_email(
           to_email,
@@ -824,9 +833,9 @@ def _run_batch_send(
           content,
           cc_email=cc_email,
           inline_images=inline_images,
-          sales_email=sales_email,
+          sales_sign_name=sales_sign_name,
           sales_phone=sales_phone,
-          fixed_text=tpl_fixed_text,
+          fixed_text=eff_fixed,
         )
         log_email_sent(
           user.name, user.login,

@@ -31,8 +31,8 @@ def get_content_for_preview(
         "风格：克制、专业、轻价值驱动、语气专业但不生硬，带温度和价值感\n"
         "输出格式：只输出完整邮件，不要加任何说明、不要加```、不要解释\n"
         "字数硬性要求：整封邮件（不含称呼+落款）在70字~100字之间\n"
-        "禁止：感叹号、emoji、过度恭维词、促销味重的形容词\n"
-        "必须包含：收件人称呼 + 价值点 + 轻推动\n"
+        "禁止：感叹号、emoji、过度恭维词、促销味重的形容词、AI味太重、翻译感太浓\n"
+        "必须包含：开头称呼 + 价值点 + 轻推动\n"
         "无需落款。\n"
         "以下是本次邮件的上下文：\n"
     )
@@ -41,12 +41,11 @@ def get_content_for_preview(
         if template:
             prompt += f"模版内容：{template}。围绕这次的模版内容，进行主要邮件营销内容的创作。\n"
         if customer:
-            prompt += f"客户姓名：{customer}\n"
+            prompt += f"开头称呼：{customer}:\n"
         # if region:
         #     prompt += f"客户所在区域：{region}\n"
         # if company_traits:
         #     prompt += f"公司特点：{company_traits}"
-    prompt += "最后可以加一句，我司专业为货代公司提供换单系统等自动化解决方案，我们的产品能有效提升客户的工作效率，降低运营成本。请根据以上要求，创作一封邮件。"
 
     if not settings.ai_api_base_url or not settings.ai_api_key:
         logger.info("AI: 未配置 base_url 或 key，返回占位")

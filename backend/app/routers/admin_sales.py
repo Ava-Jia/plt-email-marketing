@@ -17,13 +17,22 @@ def _serialize(u: User) -> dict:
     email = (u.cc_email or u.login or "").strip()
     pwd = getattr(u, "password_plain", None)
     phone = getattr(u, "contact_phone", None) or ""
+    sn = getattr(u, "sign_name", None) or ""
     return {
         "id": u.id,
         "email": email,
         "role": u.role,
         "password": pwd or "",
+        "sign_name": sn.strip() if isinstance(sn, str) else "",
         "contact_phone": phone.strip() if isinstance(phone, str) else "",
     }
+
+
+def _sync_user_display_name(row: User) -> None:
+    """日志/展示用 name：优先落款姓名，否则邮箱。"""
+    sn = (getattr(row, "sign_name", None) or "").strip()[:128]
+    em = (row.login or row.cc_email or "").strip()[:128]
+    row.name = (sn or em or "销售")[:128]
 
 
 @router.get("", response_model=list[SalesUserRead])
@@ -49,6 +58,7 @@ def create_sales(
     if existing:
         raise HTTPException(status_code=400, detail="该用户/邮箱已被使用")
     phone = (data.contact_phone or "").strip() or None
+    sign_name = (data.sign_name or "").strip()[:30] or None
     user = User(
         name=data.email[:128],
         login=data.email,
@@ -57,7 +67,9 @@ def create_sales(
         cc_email=data.email,
         password_plain=data.password,
         contact_phone=phone,
+        sign_name=sign_name,
     )
+    _sync_user_display_name(user)
     db.add(user)
     db.commit()
     db.refresh(user)
@@ -84,12 +96,14 @@ def update_sales(
             raise HTTPException(status_code=400, detail="该用户/邮箱已被使用")
         row.login = data.email
         row.cc_email = data.email
-        row.name = data.email[:128]
     if data.password is not None and data.password.strip():
         row.password_hash = hash_password(data.password)
         row.password_plain = data.password
+    if "sign_name" in data.model_fields_set:
+        row.sign_name = (data.sign_name or "").strip()[:30] or None
     if "contact_phone" in data.model_fields_set:
         row.contact_phone = (data.contact_phone or "").strip() or None
+    _sync_user_display_name(row)
     db.commit()
     db.refresh(row)
     return _serialize(row)

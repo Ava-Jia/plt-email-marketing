@@ -18,11 +18,6 @@ logger = logging.getLogger(__name__)
 router = APIRouter(prefix="/preview", tags=["preview"])
 
 
-def _user_footer_email(user: User) -> str:
-    """与 send 落款一致：优先 cc_email，否则 login。"""
-    return ((user.cc_email or user.login or "").strip()) or ""
-
-
 class PreviewGenerateRequest(BaseModel):
     template_id: int | None = None
 
@@ -97,44 +92,51 @@ def _escape_html_text(s: str) -> str:
     )
 
 
-def _preview_signature_html(sales_email: str | None, sales_phone: str | None) -> str:
-    """与 send 邮件落款一致：有邮箱才显示联系方式行；有电话则带联系电话。"""
-    em = _escape_html_text((sales_email or "").strip())
+def _footer_display_name(sign_name: str | None) -> str:
+    s = (sign_name or "").strip()[:30]
+    return s if s else "湃乐多航运科技"
+
+
+def _preview_signature_html(
+    sales_sign_name: str | None,
+    sales_phone: str | None,
+    fixed_text: str | None = None,
+) -> str:
+    """与 send 邮件落款一致：姓名、T:电话、固定文本（最后一行）。"""
+    n = _escape_html_text(_footer_display_name(sales_sign_name))
     ph = _escape_html_text((sales_phone or "").strip())
-    base_div = "此致<br/>湃乐多航运科技"
-    if not em:
-        return (
-            "<div style='margin:16px 0 0;font-size:14px;line-height:1.6;color:#111;'>"
-            f"{base_div}</div>"
-        )
-    if ph:
-        contact = f"<br/>联系方式： 邮箱地址：{em}， 联系电话：{ph}"
-    else:
-        contact = f"<br/>联系方式： 邮箱地址：{em}"
-    return (
+    block = (
         "<div style='margin:16px 0 0;font-size:14px;line-height:1.6;color:#111;'>"
-        f"{base_div}{contact}</div>"
+        f"{n}"
+        "</div>"
     )
+    if ph:
+        block += (
+            "<div style='margin:4px 0 0;font-size:14px;line-height:1.6;color:#111;'>"
+            f"{ph}"
+            "</div>"
+        )
+    ft = (fixed_text or "").strip()
+    if ft:
+        fsafe = _escape_html_text(ft).replace("\n", "<br/>")
+        block += (
+            "<div style='margin:8px 0 0;font-size:14px;line-height:1.6;color:#111;'>"
+            f"{fsafe}"
+            "</div>"
+        )
+    return block
 
 
 def build_preview_html(
     text: str,
     image_urls: list[str],
-    sales_email: str | None = None,
+    sales_sign_name: str | None = None,
     sales_phone: str | None = None,
     fixed_text: str | None = None,
 ) -> str:
-    """浏览器预览用：顺序 AI 正文 -> 固定文本 -> 图片 -> 落款。"""
+    """浏览器预览用：顺序 AI 正文 -> 图片 -> 落款（落款末行为固定文本）。"""
     safe = _escape_html_text(text or "").replace("\n", "<br/>")
     ai_block = f"<div style='font-size:14px;line-height:1.6;color:#111;'>{safe}</div>"
-    ft = (fixed_text or "").strip()
-    fixed_block = ""
-    if ft:
-        fsafe = _escape_html_text(ft).replace("\n", "<br/>")
-        fixed_block = (
-            "<div style='font-size:14px;line-height:1.6;color:#111;margin-top:12px;'>"
-            f"{fsafe}</div>"
-        )
     imgs = ""
     for url in image_urls or []:
         u = _escape_html_text(url)
@@ -147,9 +149,9 @@ def build_preview_html(
         "<!doctype html><html><body>"
         "<table role='presentation' width='100%' cellpadding='0' cellspacing='0' style='font-family:Arial,Helvetica,sans-serif;'>"
         "<tr><td>"
-        f"{ai_block}{fixed_block}"
+        f"{ai_block}"
         f"{imgs}"
-        f"{_preview_signature_html(sales_email, sales_phone)}"
+        f"{_preview_signature_html(sales_sign_name, sales_phone, fixed_text)}"
         "</td></tr></table>"
         "</body></html>"
     )
@@ -209,7 +211,7 @@ def generate_preview(
     tpl_images = _image_urls_for_template(db, tpl)
     tpl_image_urls = [x["url"] for x in tpl_images]
     tpl_fixed = (((getattr(tpl, "fixed_text", None) or "").strip()) or None) if tpl else None
-    sales_email = _user_footer_email(current_user) or None
+    sales_sign_name = (getattr(current_user, "sign_name", None) or "").strip()[:30] or None
     sales_phone = (getattr(current_user, "contact_phone", None) or "").strip() or None
     customers = (
         db.query(CustomerList)
@@ -229,7 +231,7 @@ def generate_preview(
             company_traits=traits or None,
             template=template_content or None,
         )
-        html = build_preview_html(content, tpl_image_urls, sales_email, sales_phone, tpl_fixed)
+        html = build_preview_html(content, tpl_image_urls, sales_sign_name, sales_phone, tpl_fixed)
         contents.append({
             "customer_name": name,
             "region": region,
@@ -273,9 +275,9 @@ def generate_one(
     tpl_images = _image_urls_for_template(db, tpl)
     tpl_image_urls = [x["url"] for x in tpl_images]
     tpl_fixed = ((getattr(tpl, "fixed_text", None) or "").strip()) or None
-    sales_email = _user_footer_email(current_user) or None
+    sales_sign_name = (getattr(current_user, "sign_name", None) or "").strip()[:30] or None
     sales_phone = (getattr(current_user, "contact_phone", None) or "").strip() or None
-    html = build_preview_html(content, tpl_image_urls, sales_email, sales_phone, tpl_fixed)
+    html = build_preview_html(content, tpl_image_urls, sales_sign_name, sales_phone, tpl_fixed)
     return {
         "customer_id": cust.id,
         "customer_name": cust.customer_name,

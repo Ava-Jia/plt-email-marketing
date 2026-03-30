@@ -50,6 +50,8 @@ async def lifespan(app: FastAPI):
                 conn.execute(text("ALTER TABLE users ADD COLUMN password_plain VARCHAR(128) NULL"))
             if "contact_phone" not in usr_cols:
                 conn.execute(text("ALTER TABLE users ADD COLUMN contact_phone VARCHAR(64) NULL"))
+            if "sign_name" not in usr_cols:
+                conn.execute(text("ALTER TABLE users ADD COLUMN sign_name VARCHAR(30) NULL"))
     except Exception:
         pass
     # 非 SQLite：用 inspect 补列（PostgreSQL 等）
@@ -61,6 +63,9 @@ async def lifespan(app: FastAPI):
             if "contact_phone" not in usr_cols:
                 with engine.begin() as conn:
                     conn.execute(sql_text("ALTER TABLE users ADD COLUMN contact_phone VARCHAR(64) NULL"))
+            if "sign_name" not in usr_cols:
+                with engine.begin() as conn:
+                    conn.execute(sql_text("ALTER TABLE users ADD COLUMN sign_name VARCHAR(30) NULL"))
     except Exception:
         pass
     # 若无任何用户则创建默认管理员（仅开发/首次部署方便）

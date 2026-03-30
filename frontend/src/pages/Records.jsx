@@ -10,7 +10,6 @@ export default function Records() {
   const [loading, setLoading] = useState(false)
   const [error, setError] = useState('')
   const [query, setQuery] = useState('')
-  const [expandedId, setExpandedId] = useState(null)
   const [selectedIds, setSelectedIds] = useState([])
   const [filters, setFilters] = useState({
     status: '',
@@ -113,10 +112,6 @@ export default function Records() {
   const totalPages = Math.max(1, Math.ceil(list.total / list.page_size))
   const canPrev = list.page > 1
   const canNext = list.page < totalPages
-
-  const toggleExpand = (id) => {
-    setExpandedId((prev) => (prev === id ? null : id))
-  }
 
   const toggleSelectRow = (row) => {
     if (row.status !== 'queued') return
@@ -353,16 +348,33 @@ export default function Records() {
                     row.status === 'sent' && row.sent_at
                       ? formatSentAt(row.sent_at)
                       : '—'
-                  const imageCount = Array.isArray(row.image_names) ? row.image_names.length : 0
-                  const imageBadge = imageCount > 0 ? `（含 ${imageCount} 张图片）` : ''
-                  const summary = `${row.subject || ''} ${imageBadge} ${row.fixed_text || ''} ${row.content || ''}`.trim()
-                  const short =
-                    summary.length > 60 ? `${summary.slice(0, 60)}…` : summary || '（无内容）'
-                  const imageLine =
+                  const att =
                     Array.isArray(row.image_names) && row.image_names.length
-                      ? `附件图片：${row.image_names.join('、')}`
-                      : '附件图片：无'
-                  const detailFull = `主题：${row.subject || '（无主题）'}\n${row.content || '（无内容）'}\n\n${row.fixed_text || '（无固定文本）'}\n\n${imageLine}`
+                      ? row.image_names.join('、')
+                      : '（无）'
+                  const ft = (row.fixed_text || '').trim()
+                  const footerFixed = ft || '（无固定文本）'
+                  const contentSummary =
+                    row.content_summary ||
+                    [
+                      `主题：${row.subject || '（无主题）'}`,
+                      '',
+                      '【AI 生成内容】',
+                      row.content || '（无）',
+                      '',
+                      '【附件】',
+                      att,
+                      '',
+                      '【落款】',
+                      '（见发件人配置）',
+                      '（联系方式未填）',
+                      footerFixed,
+                    ].join('\n')
+                  const summaryOneLine = contentSummary.replace(/\s+/g, ' ').trim()
+                  const short =
+                    summaryOneLine.length > 60
+                      ? `${summaryOneLine.slice(0, 60)}…`
+                      : summaryOneLine || '（无内容）'
 
                   return (
                     <tr key={row.id}>
@@ -395,32 +407,15 @@ export default function Records() {
                       <td>{row.from_email}</td>
                       <td>{row.cc_email || '—'}</td>
                       <td>
-                        <HoverFullText fullText={detailFull} style={{ cursor: 'default' }}>
-                          {expandedId !== row.id ? (
-                            <div className="cell-ellipsis">{short}</div>
-                          ) : (
-                            <div className="expand-content">
-                              <div style={{ fontWeight: 500, marginBottom: 4 }}>{row.subject || '（无主题）'}</div>
-                              <div className="text-muted text-sm" style={{ marginBottom: 6 }}>
-                                固定文本：{row.fixed_text || '（无固定文本）'}
-                              </div>
-                              <div>{row.content || '（无内容）'}</div>
-                              <div className="text-muted text-sm mt-2">
-                                附件：{Array.isArray(row.image_names) && row.image_names.length ? row.image_names.join('、') : '无'}
-                              </div>
-                            </div>
-                          )}
+                        <HoverFullText
+                          fullText={contentSummary}
+                          style={{ cursor: 'default', display: 'block', maxWidth: 320 }}
+                        >
+                          <div className="cell-ellipsis text-sm">{short}</div>
                         </HoverFullText>
                       </td>
                       <td className="text-right">
                         <div className="actions-column">
-                          <button
-                            type="button"
-                            className="btn btn-compact"
-                            onClick={() => toggleExpand(row.id)}
-                          >
-                            {expandedId === row.id ? '收起' : '查看'}
-                          </button>
                           {row.status === 'queued' && (
                             <button
                               type="button"

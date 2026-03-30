@@ -19,7 +19,7 @@ function AdminSalesUsers() {
   const [loading, setLoading] = useState(true)
   const [message, setMessage] = useState('')
   const [editing, setEditing] = useState(null)
-  const [form, setForm] = useState({ email: '', password: '', contact_phone: '' })
+  const [form, setForm] = useState({ sign_name: '', email: '', password: '', contact_phone: '' })
 
   const fetchData = () => {
     setLoading(true)
@@ -39,12 +39,13 @@ function AdminSalesUsers() {
 
   const resetForm = () => {
     setEditing(null)
-    setForm({ email: '', password: '', contact_phone: '' })
+    setForm({ sign_name: '', email: '', password: '', contact_phone: '' })
   }
 
   const handleEdit = (row) => {
     setEditing(row)
     setForm({
+      sign_name: row.sign_name || '',
       email: row.email || '',
       password: '',
       contact_phone: row.contact_phone || '',
@@ -56,13 +57,22 @@ function AdminSalesUsers() {
     setMessage('')
     const email = form.email.trim()
     const password = form.password.trim()
+    const signName = form.sign_name.trim()
 
+    if (signName.length > 30) {
+      setMessage('用户姓名最多 30 个字符')
+      return
+    }
     if (!email) {
-      setMessage('请填写用户/邮箱')
+      setMessage('请填写邮箱')
       return
     }
     if (editing) {
-      const body = { email, contact_phone: form.contact_phone.trim() }
+      const body = {
+        email,
+        sign_name: signName || null,
+        contact_phone: form.contact_phone.trim() || null,
+      }
       if (password) body.password = password
       api.put(`/admin/sales/${editing.id}`, body)
         .then(() => { resetForm(); fetchData() })
@@ -78,6 +88,7 @@ function AdminSalesUsers() {
       api.post('/admin/sales', {
         email,
         password,
+        sign_name: signName || null,
         contact_phone: form.contact_phone.trim() || null,
       })
         .then(() => { resetForm(); fetchData() })
@@ -89,7 +100,7 @@ function AdminSalesUsers() {
   }
 
   const handleDelete = (row) => {
-    if (!window.confirm(`确定删除销售【${row.email}】？删除后该账号将无法登录。`)) return
+    if (!window.confirm(`确定删除销售【${row.sign_name || row.email}】？删除后该账号将无法登录。`)) return
     setMessage('')
     api.delete(`/admin/sales/${row.id}`)
       .then(() => fetchData())
@@ -103,12 +114,23 @@ function AdminSalesUsers() {
     <section className="section admin-block">
       <h2 className="section-title">销售用户管理</h2>
       <p className="text-muted text-sm mb-4">
-        管理员在此创建销售账号。用户/邮箱 即登录账号，同时也是发件时被 CC 的邮箱。邮件落款会显示「联系方式： 邮箱地址：…」有电话时再带「联系电话：…」。
+        邮箱为登录账号，同时也是发件时被 CC 的地址。用户姓名为邮件落款首行（空则显示「湃乐多航运科技」）；第二行为 T:联系方式。
       </p>
 
       <form onSubmit={handleSubmit} className="mb-4" style={{ maxWidth: 600 }}>
         <div className="form-group">
-          <label className="form-label">用户/邮箱</label>
+          <label className="form-label">用户（落款姓名）</label>
+          <input
+            type="text"
+            className="input input-width-md"
+            value={form.sign_name}
+            onChange={(e) => setForm((f) => ({ ...f, sign_name: e.target.value.slice(0, 30) }))}
+            placeholder="选填，最多 30 字；空则落款显示「湃乐多航运科技」"
+            maxLength={30}
+          />
+        </div>
+        <div className="form-group">
+          <label className="form-label">邮箱</label>
           <input
             type="email"
             className="input input-width-md"
@@ -125,7 +147,7 @@ function AdminSalesUsers() {
             className="input input-width-md"
             value={form.contact_phone}
             onChange={(e) => setForm((f) => ({ ...f, contact_phone: e.target.value }))}
-            placeholder="选填，显示在邮件落款"
+            placeholder="选填，落款第二行 T:…"
             maxLength={64}
           />
         </div>
@@ -154,11 +176,12 @@ function AdminSalesUsers() {
       ) : rows.length === 0 ? (
         <p className="text-muted">当前暂无销售用户，请在上方新增。</p>
       ) : (
-        <div className="table-wrap" style={{ maxWidth: 880 }}>
+        <div className="table-wrap" style={{ maxWidth: 960 }}>
           <table className="table">
             <thead>
               <tr>
-                <th>用户/邮箱</th>
+                <th>用户</th>
+                <th>邮箱</th>
                 <th>联系方式</th>
                 <th>密码</th>
                 <th className="text-right">操作</th>
@@ -167,6 +190,7 @@ function AdminSalesUsers() {
             <tbody>
               {rows.map((row) => (
                 <tr key={row.id}>
+                  <td>{row.sign_name || '—'}</td>
                   <td>{row.email || '—'}</td>
                   <td>{row.contact_phone || '—'}</td>
                   <td>{row.password || '—'}</td>

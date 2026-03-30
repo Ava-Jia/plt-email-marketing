@@ -1,6 +1,7 @@
 """邮件发送记录：支持分页与按收件人/主题模糊筛选，以及按状态/To/From/Cc/发送日期筛选。"""
 from datetime import datetime, timezone, timedelta
 import json
+from pathlib import Path
 
 from fastapi import APIRouter, Depends, HTTPException, status
 import sqlalchemy as sa
@@ -39,13 +40,45 @@ def _to_beijing_iso(dt: datetime | None) -> str | None:
 
 def _base_query(db: Session, current_user):
     """当前用户可见的记录基查询（销售仅本人，管理员全部）。"""
-    q = (
-        db.query(EmailRecord, User.name)
-        .join(User, EmailRecord.sales_id == User.id, isouter=True)
-    )
+    q = db.query(EmailRecord)
     if current_user.role != "admin":
         q = q.filter(EmailRecord.sales_id == current_user.id)
     return q
+
+
+def _build_record_content_summary(
+    subject: str,
+    content: str,
+    fixed_text: str,
+    image_names: list[str],
+    sign_name: str | None,
+    contact_phone: str | None,
+) -> str:
+    """邮件记录「内容摘要」：主题、AI、附件、落款（固定文本在落款最后一行，与发信一致）。"""
+    footer_name = (sign_name or "").strip()[:30] or "湃乐多航运科技"
+    phone = (contact_phone or "").strip()
+    t_line = f"{phone}" if phone else "（未填）"
+    att = "、".join(image_names) if image_names else "（无）"
+    ft = (fixed_text or "").strip()
+    footer_lines = [footer_name, t_line]
+    if ft:
+        footer_lines.append(ft)
+    else:
+        footer_lines.append("（无固定文本）")
+    return "\n".join(
+        [
+            f"主题：{subject or '（无主题）'}",
+            "",
+            "【AI 生成内容】",
+            content or "（无）",
+            "",
+            "【附件】",
+            att,
+            "",
+            "【落款】",
+            *footer_lines,
+        ]
+    )
 
 
 @router.get("/filters")
@@ -184,17 +217,23 @@ def list_records(
 
     total = query.count()
     # 按发送时间从新到旧排序；无 sent_at 的按 created_at，SQLite 默认 DESC 时 NULL 在最后
-    rows = (
+    rows_recs = (
         query.order_by(EmailRecord.sent_at.desc(), EmailRecord.created_at.desc())
         .offset((page - 1) * page_size)
         .limit(page_size)
         .all()
     )
 
+    user_ids = {r.sales_id for r in rows_recs if r.sales_id}
+    users_map: dict[int, User] = {}
+    if user_ids:
+        for u in db.query(User).filter(User.id.in_(user_ids)).all():
+            users_map[u.id] = u
+
     # 预取本页所有记录涉及的图片名称，避免 N+1 查询
     image_ids_map: dict[int, list[int]] = {}
     image_id_set: set[int] = set()
-    for rec, _sales_name in rows:
+    for rec in rows_recs:
         if rec.image_ids:
             try:
                 ids = [int(x) for x in json.loads(rec.image_ids)]
@@ -209,13 +248,14 @@ def list_records(
     if image_id_set:
         img_rows = db.query(EmailImage).filter(EmailImage.id.in_(image_id_set)).all()
         for img in img_rows:
-            image_name_by_id[img.id] = img.name
+            fn = Path(img.file_path).name if getattr(img, "file_path", None) else ""
+            image_name_by_id[img.id] = fn or (img.name or str(img.id))
 
     now_utc = datetime.now(timezone.utc)
     orphan_threshold = now_utc - timedelta(hours=24)
 
     items = []
-    for rec, sales_name in rows:
+    for rec in rows_recs:
         # sent_at 优先：有发送时间即为已发送，修复 status 未正确更新的历史数据
         if rec.sent_at:
             display_status = "sent"
@@ -233,11 +273,23 @@ def list_records(
 
         ids = image_ids_map.get(rec.id, [])
         image_names = [image_name_by_id.get(i, str(i)) for i in ids if i in image_name_by_id]
+        owner = users_map.get(rec.sales_id) if rec.sales_id else None
+        sales_name = (owner.name or "") if owner else ""
+        sign_nm = getattr(owner, "sign_name", None) if owner else None
+        contact_ph = getattr(owner, "contact_phone", None) if owner else None
+        content_summary = _build_record_content_summary(
+            rec.subject or "",
+            rec.content or "",
+            rec.fixed_text or "",
+            image_names,
+            sign_nm,
+            contact_ph,
+        )
         items.append(
             {
                 "id": rec.id,
                 "sales_id": rec.sales_id,
-                "sales_name": sales_name or "",
+                "sales_name": sales_name,
                 "to_email": rec.to_email,
                 "from_email": rec.from_email,
                 "cc_email": rec.cc_email,
@@ -245,6 +297,7 @@ def list_records(
                 "content": rec.content,
                 "fixed_text": rec.fixed_text or "",
                 "image_names": image_names,
+                "content_summary": content_summary,
                 "status": display_status,
                 "created_at": rec.created_at.isoformat() if isinstance(rec.created_at, datetime) else None,
                 "sent_at": sent_at_iso,
