@@ -145,7 +145,6 @@ def update_template(
     db.refresh(row)
     return _serialize(row)
 
-
 @router.patch("/{item_id}/publish")
 def publish_template(
     item_id: int,
