@@ -43,6 +43,9 @@ router = APIRouter(prefix="/send", tags=["send"])
 # 测试发信：限制收件人数量，防止滥用 SMTP
 MAX_TEST_TO_EMAILS = 15
 
+# 邮件落款第三行固定文案（与模版「固定文本」无关）
+SIGNATURE_CLOSING_LINE = "新换单，湃乐多"
+
 
 def _footer_display_name(sign_name: str | None) -> str:
   """落款首行：销售配置的姓名，空则用默认公司名。"""
@@ -53,46 +56,31 @@ def _footer_display_name(sign_name: str | None) -> str:
 def _signature_plain(
   sales_sign_name: str | None,
   sales_phone: str | None,
-  fixed_text: str | None = None,
 ) -> str:
-  """落款：姓名行、联系方式（可选）、固定文本（最后一行，可选）。"""
-  lines: list[str] = [_footer_display_name(sales_sign_name)]
+  """落款固定三行：用户姓名、联系方式、固定结束语。"""
+  name = _footer_display_name(sales_sign_name)
   ph = (sales_phone or "").strip()
-  if ph:
-    lines.append(f"{ph}")
-  ft = (fixed_text or "").strip()
-  if ft:
-    lines.append(ft)
-  return "\n".join(lines)
+  return "\n".join([name, ph, SIGNATURE_CLOSING_LINE])
 
 
 def _signature_html(
   sales_sign_name: str | None,
   sales_phone: str | None,
-  fixed_text: str | None = None,
 ) -> str:
   n = html.escape(_footer_display_name(sales_sign_name))
   ph = html.escape((sales_phone or "").strip())
-  block = (
+  tag = html.escape(SIGNATURE_CLOSING_LINE)
+  return (
     "<div style='margin:16px 0 0;font-size:14px;line-height:1.6;color:#111;'>"
     f"{n}"
     "</div>"
+    "<div style='margin:4px 0 0;font-size:14px;line-height:1.6;color:#111;'>"
+    f"{ph}"
+    "</div>"
+    "<div style='margin:4px 0 0;font-size:14px;line-height:1.6;color:#111;'>"
+    f"{tag}"
+    "</div>"
   )
-  if ph:
-    block += (
-      "<div style='margin:4px 0 0;font-size:14px;line-height:1.6;color:#111;'>"
-      f"{ph}"
-      "</div>"
-    )
-  ft = (fixed_text or "").strip()
-  if ft:
-    fsafe = html.escape(ft).replace("\n", "<br/>")
-    block += (
-      "<div style='margin:8px 0 0;font-size:14px;line-height:1.6;color:#111;'>"
-      f"{fsafe}"
-      "</div>"
-    )
-  return block
 
 
 def _normalize_email_for_dedup(raw: str) -> str:
@@ -510,12 +498,15 @@ def _text_to_html(text: str) -> str:
   return f"<div style='font-size:14px;line-height:1.6;color:#111;'>{safe}</div>"
 
 
-def _compose_plain_body(ai: str, sig: str) -> str:
-  """纯文本：AI 正文与落款（落款末行为固定文本），段间空行。"""
+def _compose_plain_body(ai: str, fixed: str | None, sig: str) -> str:
+  """纯文本：AI 正文、模版固定文本（在图片前）、落款，段间空行。"""
   parts: list[str] = []
   a = (ai or "").rstrip()
   if a:
     parts.append(a)
+  f = (fixed or "").strip()
+  if f:
+    parts.append(f"\n{f}\n")
   parts.append(sig)
   return "\n\n".join(parts)
 
@@ -537,10 +528,16 @@ def _build_email_html(
       f"<img src=\"cid:{cid}\" style='display:block;border:0;max-width:100%;height:auto;' width='600'/>"
       "</div>"
     )
-  # 排版顺序：AI 正文 -> 图片 -> 落款（落款末行为固定文本）
-  body = _text_to_html(content_text) + imgs + _signature_html(
-    sales_sign_name, sales_phone, fixed_text
-  )
+  # 排版顺序：AI 正文 -> 模版固定文本 -> 图片 -> 落款（固定三行）
+  blocks = [_text_to_html(content_text)]
+  ft = (fixed_text or "").strip()
+  if ft:
+    blocks.append(
+      "<div style='margin:20px 0;'>"
+      f"{_text_to_html(ft)}"
+      "</div>"
+    )
+  body = "".join(blocks) + imgs + _signature_html(sales_sign_name, sales_phone)
   return (
     "<!doctype html><html><body>"
     "<table role='presentation' width='100%' cellpadding='0' cellspacing='0' style='font-family:Arial,Helvetica,sans-serif;'>"
@@ -582,8 +579,8 @@ def _send_smtp_email(
   if cc_email:
     msg["Cc"] = cc_email
   # 纯文本兜底 + HTML 正文（含 CID 内嵌图片）
-  sig = _signature_plain(sales_sign_name, sales_phone, fixed_text)
-  plain = _compose_plain_body(content or "", sig)
+  sig = _signature_plain(sales_sign_name, sales_phone)
+  plain = _compose_plain_body(content or "", fixed_text, sig)
   msg.set_content(plain, subtype="plain", charset="utf-8")
   html_body = _build_email_html(
     content or "",

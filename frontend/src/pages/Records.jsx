@@ -353,7 +353,7 @@ export default function Records() {
                       ? row.image_names.join('、')
                       : '（无）'
                   const ft = (row.fixed_text || '').trim()
-                  const footerFixed = ft || '（无固定文本）'
+                  const closing = '新换单，湃乐多'
                   const contentSummary =
                     row.content_summary ||
                     [
@@ -362,13 +362,16 @@ export default function Records() {
                       '【AI 生成内容】',
                       row.content || '（无）',
                       '',
+                      '【固定文本】',
+                      ft || '（无）',
+                      '',
                       '【附件】',
                       att,
                       '',
                       '【落款】',
                       '（见发件人配置）',
-                      '（联系方式未填）',
-                      footerFixed,
+                      '（未填）',
+                      closing,
                     ].join('\n')
                   const summaryOneLine = contentSummary.replace(/\s+/g, ' ').trim()
                   const short =

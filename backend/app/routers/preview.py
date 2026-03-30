@@ -17,6 +17,9 @@ from app.services.ai_content_service import get_content_for_preview
 logger = logging.getLogger(__name__)
 router = APIRouter(prefix="/preview", tags=["preview"])
 
+# 与 send 落款第三行一致
+SIGNATURE_CLOSING_LINE = "新换单，湃乐多"
+
 
 class PreviewGenerateRequest(BaseModel):
     template_id: int | None = None
@@ -100,31 +103,22 @@ def _footer_display_name(sign_name: str | None) -> str:
 def _preview_signature_html(
     sales_sign_name: str | None,
     sales_phone: str | None,
-    fixed_text: str | None = None,
 ) -> str:
-    """与 send 邮件落款一致：姓名、T:电话、固定文本（最后一行）。"""
+    """与 send 邮件落款一致：姓名、联系方式、固定结束语（三行）。"""
     n = _escape_html_text(_footer_display_name(sales_sign_name))
     ph = _escape_html_text((sales_phone or "").strip())
-    block = (
+    tag = _escape_html_text(SIGNATURE_CLOSING_LINE)
+    return (
         "<div style='margin:16px 0 0;font-size:14px;line-height:1.6;color:#111;'>"
         f"{n}"
         "</div>"
+        "<div style='margin:4px 0 0;font-size:14px;line-height:1.6;color:#111;'>"
+        f"{ph}"
+        "</div>"
+        "<div style='margin:4px 0 0;font-size:14px;line-height:1.6;color:#111;'>"
+        f"{tag}"
+        "</div>"
     )
-    if ph:
-        block += (
-            "<div style='margin:4px 0 0;font-size:14px;line-height:1.6;color:#111;'>"
-            f"{ph}"
-            "</div>"
-        )
-    ft = (fixed_text or "").strip()
-    if ft:
-        fsafe = _escape_html_text(ft).replace("\n", "<br/>")
-        block += (
-            "<div style='margin:8px 0 0;font-size:14px;line-height:1.6;color:#111;'>"
-            f"{fsafe}"
-            "</div>"
-        )
-    return block
 
 
 def build_preview_html(
@@ -134,9 +128,17 @@ def build_preview_html(
     sales_phone: str | None = None,
     fixed_text: str | None = None,
 ) -> str:
-    """浏览器预览用：顺序 AI 正文 -> 图片 -> 落款（落款末行为固定文本）。"""
+    """浏览器预览用：顺序 AI 正文 -> 模版固定文本 -> 图片 -> 落款（固定三行）。"""
     safe = _escape_html_text(text or "").replace("\n", "<br/>")
     ai_block = f"<div style='font-size:14px;line-height:1.6;color:#111;'>{safe}</div>"
+    ft = (fixed_text or "").strip()
+    fixed_block = ""
+    if ft:
+        fsafe = _escape_html_text(ft).replace("\n", "<br/>")
+        fixed_block = (
+            "<div style='font-size:14px;line-height:1.6;color:#111;margin-top:12px;'>"
+            f"{fsafe}</div>"
+        )
     imgs = ""
     for url in image_urls or []:
         u = _escape_html_text(url)
@@ -149,9 +151,9 @@ def build_preview_html(
         "<!doctype html><html><body>"
         "<table role='presentation' width='100%' cellpadding='0' cellspacing='0' style='font-family:Arial,Helvetica,sans-serif;'>"
         "<tr><td>"
-        f"{ai_block}"
+        f"{ai_block}{fixed_block}"
         f"{imgs}"
-        f"{_preview_signature_html(sales_sign_name, sales_phone, fixed_text)}"
+        f"{_preview_signature_html(sales_sign_name, sales_phone)}"
         "</td></tr></table>"
         "</body></html>"
     )

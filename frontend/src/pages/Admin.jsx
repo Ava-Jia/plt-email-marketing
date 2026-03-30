@@ -114,7 +114,7 @@ function AdminSalesUsers() {
     <section className="section admin-block">
       <h2 className="section-title">销售用户管理</h2>
       <p className="text-muted text-sm mb-4">
-        邮箱为登录账号，同时也是发件时被 CC 的地址。用户姓名为邮件落款首行（空则显示「湃乐多航运科技」）；第二行为 T:联系方式。
+        邮箱为登录账号，同时也是发件时被 CC 的地址。用户姓名为邮件落款首行（空则显示「湃乐多航运科技」）；第二行为联系方式；第三行固定为「新换单，湃乐多」。
       </p>
 
       <form onSubmit={handleSubmit} className="mb-4" style={{ maxWidth: 600 }}>
@@ -125,7 +125,7 @@ function AdminSalesUsers() {
             className="input input-width-md"
             value={form.sign_name}
             onChange={(e) => setForm((f) => ({ ...f, sign_name: e.target.value.slice(0, 30) }))}
-            placeholder="选填，最多 30 字；空则落款显示「湃乐多航运科技」"
+            placeholder="选填，最多 30 字符"
             maxLength={30}
           />
         </div>
@@ -147,7 +147,7 @@ function AdminSalesUsers() {
             className="input input-width-md"
             value={form.contact_phone}
             onChange={(e) => setForm((f) => ({ ...f, contact_phone: e.target.value }))}
-            placeholder="选填，落款第二行 T:…"
+            placeholder="选填"
             maxLength={64}
           />
         </div>
@@ -399,7 +399,7 @@ function AdminTemplates() {
     <section className="section admin-block">
       <h2 className="section-title">邮件模版管理</h2>
       <p className="text-muted text-sm mb-4">
-        每条记录是一套邮件模版：标题（唯一）+ 文字模版 + 固定文本 + 图片物料。管理员创建模版后需通过「发布」和「禁用」管理模版状态。
+        每条记录是一套邮件模版：标题（唯一）+ 文字模版 + 固定文本（发信时插在 AI 正文与图片之间）+ 图片物料。管理员创建模版后需通过「发布」和「禁用」管理模版状态。
       </p>
 
       <form onSubmit={handleSubmit} className="mb-4">

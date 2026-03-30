@@ -54,17 +54,13 @@ def _build_record_content_summary(
     sign_name: str | None,
     contact_phone: str | None,
 ) -> str:
-    """邮件记录「内容摘要」：主题、AI、附件、落款（固定文本在落款最后一行，与发信一致）。"""
+    """邮件记录「内容摘要」：主题、AI、固定文本、附件、落款（与发信顺序一致）。"""
     footer_name = (sign_name or "").strip()[:30] or "湃乐多航运科技"
     phone = (contact_phone or "").strip()
-    t_line = f"{phone}" if phone else "（未填）"
+    phone_line = phone if phone else "（未填）"
     att = "、".join(image_names) if image_names else "（无）"
     ft = (fixed_text or "").strip()
-    footer_lines = [footer_name, t_line]
-    if ft:
-        footer_lines.append(ft)
-    else:
-        footer_lines.append("（无固定文本）")
+    closing = "新换单，湃乐多"
     return "\n".join(
         [
             f"主题：{subject or '（无主题）'}",
@@ -72,11 +68,16 @@ def _build_record_content_summary(
             "【AI 生成内容】",
             content or "（无）",
             "",
+            "【固定文本】",
+            ft or "（无）",
+            "",
             "【附件】",
             att,
             "",
             "【落款】",
-            *footer_lines,
+            footer_name,
+            phone_line,
+            closing,
         ]
     )
 
