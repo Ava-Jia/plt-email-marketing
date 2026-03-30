@@ -523,7 +523,7 @@ function AdminTemplates() {
       ) : list.length === 0 ? (
         <p className="text-muted">暂无模版，请在上方新增。</p>
       ) : (
-        <div className="table-wrap" style={{ maxWidth: 900 }}>
+        <div className="table-wrap" style={{ maxWidth: 1200 }}>
           <table className="table" style={{ minWidth: 880 }}>
             <thead>
               <tr>
@@ -532,14 +532,14 @@ function AdminTemplates() {
                 <th>固定文本</th>
                 <th>图片</th>
                 <th>状态</th>
-                <th style={{ width: 200, textAlign: 'right' }}>操作</th>
+                <th style={{ maxWidth: 320, textAlign: 'right' }}>操作</th>
               </tr>
             </thead>
             <tbody>
               {pageItems.map((t) => (
                 <tr key={t.id}>
                   <td>{t.name}</td>
-                  <td className="cell-ellipsis" style={{ maxWidth: 220 }} title={t.content || ''}>{t.content?.slice(0, 60)}{t.content && t.content.length > 60 ? '…' : ''}</td>
+                  <td className="cell-ellipsis" style={{ maxWidth: 160 }} title={t.content || ''}>{t.content?.slice(0, 60)}{t.content && t.content.length > 60 ? '…' : ''}</td>
                   <td className="cell-ellipsis text-muted" style={{ maxWidth: 160 }} title={t.fixed_text || ''}>
                     {(t.fixed_text || '').trim() ? `${(t.fixed_text || '').trim().slice(0, 40)}${(t.fixed_text || '').trim().length > 40 ? '…' : ''}` : '—'}
                   </td>

@@ -430,16 +430,29 @@ def _build_attachments_from_image_ids(
   return attachments
 
 
-def _jpeg_to_png(data: bytes) -> bytes | None:
-  """将 JPG/JPEG 转为 PNG，用于 Foxmail 等客户端的 inline 显示兼容。转换失败时返回 None。"""
+def _prepare_inline_jpeg(data: bytes) -> bytes | None:
+  """将 JPEG 字节限长边并重压为 JPEG，控制邮件体积。失败返回 None（调用方保留原图）。"""
   try:
     img = Image.open(io.BytesIO(data))
-    if img.mode in ("RGBA", "P"):
+    if img.mode == "P":
       img = img.convert("RGBA")
-    else:
+    if img.mode == "RGBA":
+      bg = Image.new("RGB", img.size, (255, 255, 255))
+      bg.paste(img, mask=img.split()[3])
+      img = bg
+    elif img.mode != "RGB":
       img = img.convert("RGB")
+    max_side = max(320, min(int(settings.inline_image_max_side or 1400), 8192))
+    w, h = img.size
+    if max(w, h) > max_side:
+      try:
+        resample = Image.Resampling.LANCZOS
+      except AttributeError:
+        resample = Image.LANCZOS  # type: ignore[attr-defined]
+      img.thumbnail((max_side, max_side), resample)
+    q = max(40, min(int(settings.inline_jpeg_quality or 85), 95))
     buf = io.BytesIO()
-    img.save(buf, format="PNG")
+    img.save(buf, format="JPEG", quality=q, optimize=True)
     return buf.getvalue()
   except Exception:
     return None
@@ -451,8 +464,8 @@ def _build_inline_images_from_image_ids(
 ) -> list[dict]:
   """
   根据图片 id 列表构造 inline 图片：
-  [{"cid": "xxx", "maintype": "image", "subtype": "png", "data": b"...", "filename": "a.png"}]
-  JPG/JPEG 会转为 PNG，以兼容 Foxmail 的 inline 显示。
+  [{"cid": "xxx", "maintype": "image", "subtype": "jpeg", "data": b"...", "filename": "a.jpg"}]
+  JPG/JPEG 会按配置限长边并重压为 JPEG，避免旧逻辑转 PNG 导致体积暴涨。
   """
   if not image_ids:
     return []
@@ -474,20 +487,20 @@ def _build_inline_images_from_image_ids(
       maintype, subtype = mimetype.split("/", 1)
     else:
       maintype, subtype = "application", "octet-stream"
-    # JPG/JPEG 转 PNG，兼容 Foxmail 等客户端的 inline 显示
+    # JPG/JPEG：限长边 + 重压为 JPEG（失败则沿用原文件）
     if subtype.lower() in ("jpeg", "jpg"):
-      converted = _jpeg_to_png(data)
+      converted = _prepare_inline_jpeg(data)
       if converted is not None:
         data = converted
-        maintype, subtype = "image", "png"
+        maintype, subtype = "image", "jpeg"
     raw_name = (img.name or "").strip()
     filename = full_path.name
     if raw_name:
       filename = raw_name if Path(raw_name).suffix else f"{raw_name}{full_path.suffix}"
       if not Path(filename).suffix:
         filename = full_path.name
-    if maintype == "image" and subtype == "png":
-      filename = str(Path(filename).with_suffix(".png"))
+    if maintype == "image" and subtype == "jpeg":
+      filename = str(Path(filename).with_suffix(".jpg"))
     cid = make_msgid()[1:-1]  # 去掉尖括号，HTML 中用 cid:xxx
     out.append({"cid": cid, "maintype": maintype, "subtype": subtype, "data": data, "filename": filename})
   return out
