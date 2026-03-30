@@ -12,6 +12,7 @@ from app.database import get_db
 from app.dependencies import get_current_user
 from app.models import CustomerList, EmailImage, EmailTemplate, User
 from app.models.email_template import STATUS_ENABLED, STATUS_PENDING
+from app.schemas.email_template import deserialize_template_image_ids
 from app.services.ai_content_service import get_content_for_preview
 
 logger = logging.getLogger(__name__)
@@ -174,12 +175,8 @@ def list_templates(
         rows = db.query(EmailTemplate).filter(EmailTemplate.status == STATUS_ENABLED).order_by(EmailTemplate.id).all()
     items = []
     for r in rows:
-        image_ids = None
-        if getattr(r, "image_ids", None):
-            try:
-                image_ids = json.loads(r.image_ids)
-            except Exception:
-                image_ids = None
+        raw = getattr(r, "image_ids", None)
+        image_ids = deserialize_template_image_ids(raw if isinstance(raw, str) else None)
         items.append({
             "id": r.id,
             "name": r.name,

@@ -10,7 +10,12 @@ from app.dependencies import require_admin
 from app.models import EmailTemplate, SendSchedule, User
 from app.services.app_logger import log_template_disabled, log_template_published
 from app.models.email_template import STATUS_DISABLED, STATUS_ENABLED, STATUS_PENDING
-from app.schemas.email_template import EmailTemplateCreate, EmailTemplateRead, EmailTemplateUpdate
+from app.schemas.email_template import (
+    EmailTemplateCreate,
+    EmailTemplateRead,
+    EmailTemplateUpdate,
+    deserialize_template_image_ids,
+)
 
 router = APIRouter(prefix="/admin/templates", tags=["admin-templates"])
 
@@ -54,13 +59,8 @@ def _parse_ids(ids: list[int] | None) -> str | None:
 
 
 def _serialize(row: EmailTemplate) -> dict:
-    image_ids = None
     raw = getattr(row, "image_ids", None)
-    if raw:
-        try:
-            image_ids = json.loads(raw)
-        except Exception:
-            image_ids = None
+    image_ids = deserialize_template_image_ids(raw if isinstance(raw, str) else None)
     s = getattr(row, "status", None) or STATUS_PENDING
     if s not in (STATUS_PENDING, STATUS_ENABLED, STATUS_DISABLED):
         s = STATUS_PENDING
@@ -138,8 +138,9 @@ def update_template(
         row.content = data.content
     if data.fixed_text is not None:
         row.fixed_text = (data.fixed_text or "").strip() or None
-    if getattr(data, "image_ids", None) is not None:
-        row.image_ids = _parse_ids(getattr(data, "image_ids", None))
+    # 显式传 image_ids（含 null / []）才更新，避免「未传字段」误清空；null 表示清空内嵌图
+    if "image_ids" in data.model_fields_set:
+        row.image_ids = _parse_ids(data.image_ids)
     db.commit()
     db.refresh(row)
     return _serialize(row)

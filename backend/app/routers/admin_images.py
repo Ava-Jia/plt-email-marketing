@@ -10,6 +10,7 @@ from app.config import settings
 from app.database import get_db
 from app.dependencies import require_admin
 from app.models import EmailImage, User
+from app.services.email_inline_image import normalize_to_inline_png
 
 router = APIRouter(prefix="/admin/images", tags=["admin-images"])
 
@@ -51,11 +52,14 @@ def upload_image(
     content = file.file.read()
     if not content:
         raise HTTPException(status_code=400, detail="文件为空")
+    png_bytes = normalize_to_inline_png(content)
+    if not png_bytes:
+        raise HTTPException(status_code=400, detail="无法解析为图片或处理失败")
     unique = uuid.uuid4().hex[:12]
-    filename = f"{unique}{ext}"
+    filename = f"{unique}.png"
     upload_d = _upload_dir()
     path = upload_d / filename
-    path.write_bytes(content)
+    path.write_bytes(png_bytes)
     relative_path = f"images/{filename}"
     row = EmailImage(name=name, file_path=relative_path)
     db.add(row)

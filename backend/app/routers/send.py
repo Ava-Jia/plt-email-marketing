@@ -1,5 +1,4 @@
 """发送相关接口：测试发送 + 批量发送（SMTP + 限频）+ 循环发送计划。"""
-import io
 import unicodedata
 from datetime import datetime, timedelta, timezone
 from email.message import EmailMessage
@@ -10,7 +9,6 @@ import json
 import mimetypes
 import smtplib
 
-from PIL import Image
 import ssl
 import threading
 import time
@@ -26,6 +24,7 @@ from app.dependencies import CurrentUser
 from app.models import CustomerList, EmailImage, EmailRecord, EmailTemplate, SendSchedule, User
 from app.models.email_template import STATUS_DISABLED, STATUS_ENABLED, STATUS_PENDING
 from app.services.ai_content_service import get_content_for_preview
+from app.services.email_inline_image import normalize_to_inline_png
 from app.services.app_logger import (
   log_batch_send_created,
   log_batch_send_start,
@@ -430,42 +429,14 @@ def _build_attachments_from_image_ids(
   return attachments
 
 
-def _prepare_inline_jpeg(data: bytes) -> bytes | None:
-  """将 JPEG 字节限长边并重压为 JPEG，控制邮件体积。失败返回 None（调用方保留原图）。"""
-  try:
-    img = Image.open(io.BytesIO(data))
-    if img.mode == "P":
-      img = img.convert("RGBA")
-    if img.mode == "RGBA":
-      bg = Image.new("RGB", img.size, (255, 255, 255))
-      bg.paste(img, mask=img.split()[3])
-      img = bg
-    elif img.mode != "RGB":
-      img = img.convert("RGB")
-    max_side = max(320, min(int(settings.inline_image_max_side or 1400), 8192))
-    w, h = img.size
-    if max(w, h) > max_side:
-      try:
-        resample = Image.Resampling.LANCZOS
-      except AttributeError:
-        resample = Image.LANCZOS  # type: ignore[attr-defined]
-      img.thumbnail((max_side, max_side), resample)
-    q = max(40, min(int(settings.inline_jpeg_quality or 85), 95))
-    buf = io.BytesIO()
-    img.save(buf, format="JPEG", quality=q, optimize=True)
-    return buf.getvalue()
-  except Exception:
-    return None
-
-
 def _build_inline_images_from_image_ids(
   db: Session,
   image_ids: list[int] | None,
 ) -> list[dict]:
   """
   根据图片 id 列表构造 inline 图片：
-  [{"cid": "xxx", "maintype": "image", "subtype": "jpeg", "data": b"...", "filename": "a.jpg"}]
-  JPG/JPEG 会按配置限长边并重压为 JPEG，避免旧逻辑转 PNG 导致体积暴涨。
+  [{"cid": "xxx", "maintype": "image", "subtype": "png", "data": b"...", "filename": "a.png"}]
+  新上传物料已为内联 PNG；磁盘上仍为 .jpg/.gif/.webp 等旧文件时，发信前会规范化一次。
   """
   if not image_ids:
     return []
@@ -487,20 +458,23 @@ def _build_inline_images_from_image_ids(
       maintype, subtype = mimetype.split("/", 1)
     else:
       maintype, subtype = "application", "octet-stream"
-    # JPG/JPEG：限长边 + 重压为 JPEG（失败则沿用原文件）
-    if subtype.lower() in ("jpeg", "jpg"):
-      converted = _prepare_inline_jpeg(data)
+    ext = full_path.suffix.lower()
+    # 上传阶段已统一为 .png 时直接内联，避免每封邮件重复解码压缩
+    if ext == ".png":
+      maintype, subtype = "image", "png"
+    else:
+      converted = normalize_to_inline_png(data)
       if converted is not None:
         data = converted
-        maintype, subtype = "image", "jpeg"
+        maintype, subtype = "image", "png"
     raw_name = (img.name or "").strip()
     filename = full_path.name
     if raw_name:
       filename = raw_name if Path(raw_name).suffix else f"{raw_name}{full_path.suffix}"
       if not Path(filename).suffix:
         filename = full_path.name
-    if maintype == "image" and subtype == "jpeg":
-      filename = str(Path(filename).with_suffix(".jpg"))
+    if maintype == "image" and subtype == "png":
+      filename = str(Path(filename).with_suffix(".png"))
     cid = make_msgid()[1:-1]  # 去掉尖括号，HTML 中用 cid:xxx
     out.append({"cid": cid, "maintype": maintype, "subtype": subtype, "data": data, "filename": filename})
   return out

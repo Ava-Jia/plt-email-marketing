@@ -41,9 +41,9 @@ class Settings(BaseSettings):
     ai_api_model: str = "gpt-4o-mini"
 
 
-    # 邮件内联图片：JPEG 限长边 + 质量重压缩（避免原 JPG→PNG 体积暴涨）
+    # 邮件内联图片：限长边；上传与规范化均为 PNG（optimize + compress_level=9）
     inline_image_max_side: int = 1400
-    inline_jpeg_quality: int = 85
+    inline_jpeg_quality: int = 85  # 保留兼容 .env，当前内联链路已改用 PNG，未使用
 
     # 上传目录（相对项目根或绝对路径）
     upload_dir: str = "uploads"

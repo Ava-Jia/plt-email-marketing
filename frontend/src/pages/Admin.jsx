@@ -258,7 +258,7 @@ function AdminTemplates() {
       name,
       content: form.content.trim(),
       fixed_text: form.fixed_text.trim(),
-      image_ids: Array.isArray(form.image_ids) && form.image_ids.length ? form.image_ids : null,
+      image_ids: Array.isArray(form.image_ids) ? form.image_ids : null,
     }
     if (editing) {
       api
@@ -543,7 +543,7 @@ function AdminTemplates() {
                   <td className="cell-ellipsis text-muted" style={{ maxWidth: 160 }} title={t.fixed_text || ''}>
                     {(t.fixed_text || '').trim() ? `${(t.fixed_text || '').trim().slice(0, 40)}${(t.fixed_text || '').trim().length > 40 ? '…' : ''}` : '—'}
                   </td>
-                  <td className="text-muted">{Array.isArray(t.image_ids) ? `${t.image_ids.length} 张` : '0 张'}</td>
+                  <td className="text-muted">{(t.image_ids || []).length} 张</td>
                   <td>
                     <span className={(t.status || 'pending') === 'enabled' ? 'text-success' : 'text-muted'}>
                       {STATUS_LABELS[t.status || 'pending'] || '待发布'}
